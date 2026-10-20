@@ -55,9 +55,3 @@ DeskIsle 通过 PyInstaller 的 one-folder 模式打包，Qt 库以**动态链�
 
 `packaging/DeskIsle.ico` 与 `packaging/DeskIsle.png` 由仓库内
 `tools/make_app_icon.py` 用代码绘制生成，不包含第三方素材。
-
-## 关于 Stardock Fences
-
-DeskIsle 是独立原创实现，**不包含** Stardock Fences 的代码、商标、图标、
-素材或文案。功能上的相似之处源于对公开产品文档的调研，详见
-`docs/调研与功能映射.md`。

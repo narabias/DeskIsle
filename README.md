@@ -100,5 +100,3 @@ powershell -File tools/build_release.ps1 -NoOpen
 打包产物包含 PySide6/Qt（LGPLv3）等第三方组件，详见
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-DeskIsle 是独立原创实现，不包含 Stardock Fences 的代码、商标或素材。
-
