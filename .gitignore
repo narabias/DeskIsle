@@ -1,0 +1,72 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+ENV/
+
+# ---- PyInstaller / build output ----
+# The 119 MB bundle must never be committed.
+work/
+worktmp-*/
+*.spec.bak
+
+# ---- Inno Setup output ----
+dist/installer/
+*.sha256
+
+# ---- DeskIsle runtime data ----
+.demo-data/
+.demo3/
+.desktop-smoke/
+.selftest-*/
+artifacts/
+*.crash.log
+state.json
+state.json.bak
+snapshots/
+
+# ---- Test residue ----
+tests/.test-work/
+
+# ---- Tooling caches ----
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Local secrets ----
+.env
+.env.*
+*.pem

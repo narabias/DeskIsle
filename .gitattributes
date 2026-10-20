@@ -1,0 +1,15 @@
+# Normalize line endings so Windows and Linux contributors do not fight.
+* text=auto eol=lf
+
+# Windows batch and VBScript must keep CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+
+# Binary assets must never be line-ending converted.
+*.ico binary
+*.png binary
+*.svg binary
+*.isl binary
