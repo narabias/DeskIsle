@@ -9,22 +9,21 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
 from PySide6.QtCore import QTimer  # noqa: E402
-from PySide6.QtGui import QFont  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from deskisle import html_view, theme  # noqa: E402
 from deskisle.board import DesktopWindow  # noqa: E402
 from deskisle.storage import StateStore  # noqa: E402
-from deskisle.theme import app_stylesheet  # noqa: E402
 from main import demo_state  # noqa: E402
 
 
 def main() -> int:
     output = Path(sys.argv[1]) if len(sys.argv) > 1 else PROJECT / "artifacts" / "demo.png"
     output.parent.mkdir(parents=True, exist_ok=True)
+    html_view.prepare_application()
     app = QApplication([])
-    app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyle("Fusion")
-    app.setStyleSheet(app_stylesheet())
+    theme.apply_app_font(app)
     window = DesktopWindow(demo_state(), StateStore(PROJECT / ".demo-data"), demo_mode=True)
     window.resize(1280, 760)
     window.show()
@@ -35,7 +34,8 @@ def main() -> int:
         window.close()
         app.quit()
 
-    QTimer.singleShot(800, capture)
+    # Leave time for the glass backdrop, media and HTML islands to settle.
+    QTimer.singleShot(int(sys.argv[2]) if len(sys.argv) > 2 else 1600, capture)
     return app.exec()
 
 

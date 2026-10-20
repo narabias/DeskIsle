@@ -8,14 +8,16 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QLockFile, Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from deskisle import html_view, theme
 from deskisle.board import DesktopWindow
 from deskisle.models import AppState, IslandState, ItemRef, PageState, Rule, TabState
 from deskisle.native_win import restore_native_desktop_icons
 from deskisle.storage import StateStore
-from deskisle.theme import APP_NAME, ISLAND_COLORS, app_stylesheet
+from deskisle.theme import APP_NAME, ISLAND_COLORS
+
+DEMO_ANIMATION = Path(__file__).resolve().parent / "deskisle" / "assets" / "demo" / "aurora.html"
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +80,18 @@ def demo_state() -> AppState:
                 height=260,
                 color=ISLAND_COLORS[2],
                 tabs=[TabState(title="收集箱")],
+                material="liquid",
+            ),
+            IslandState(
+                title="HTML 动画",
+                x=875,
+                y=390,
+                width=330,
+                height=230,
+                color=ISLAND_COLORS[3],
+                tabs=[TabState(title="全部")],
+                kind="html",
+                html_path=str(DEMO_ANIMATION) if DEMO_ANIMATION.is_file() else "",
             ),
         ],
     )
@@ -104,6 +118,16 @@ def install_exception_guard(app: QApplication) -> None:
     sys.excepthook = handle_exception
 
 
+def apply_saved_font(app: QApplication, state: AppState) -> None:
+    prefs = state.preferences
+    try:
+        size = float(getattr(prefs, "font_size", 10.0) or 10.0)
+    except (TypeError, ValueError):
+        size = 10.0
+    theme.apply_app_font(app, str(getattr(prefs, "font_family", "") or ""), size,
+                         str(getattr(prefs, "font_file", "") or ""))
+
+
 def main() -> int:
     args = parse_args()
     if args.self_test:
@@ -112,12 +136,13 @@ def main() -> int:
     QCoreApplication.setOrganizationName("DeskIsle")
     QCoreApplication.setApplicationName("DeskIsle")
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # HTML / web islands: WebEngine must be configured before QApplication.
+    html_view.prepare_application()
     app = QApplication(sys.argv)
-    app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setQuitOnLastWindowClosed(bool(args.demo))
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
-    app.setStyleSheet(app_stylesheet())
+    theme.apply_app_font(app)
     install_exception_guard(app)
 
     if args.demo:
@@ -148,7 +173,13 @@ def main() -> int:
             store.save(state)
         else:
             state = store.load()
+        try:
+            # Drop copied background media no layout or snapshot refers to.
+            store.prune_media(state)
+        except Exception:
+            pass
 
+    apply_saved_font(app, state)
     window = DesktopWindow(state, store, demo_mode=args.demo)
     window.show()
     exit_code = app.exec()

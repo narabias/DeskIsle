@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>极光</title>
+<!--
+  桌屿 HTML 动画岛示例：纯 CSS，只动画 transform / opacity（由合成器处理，几乎不占 CPU）。
+  背景保持透明，收纳岛的玻璃质感会从后面透出来。可以照着这个文件写自己的动画。
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; color: #fff; }
+  .blob {
+    position: absolute; width: 62vmax; height: 62vmax; border-radius: 50%;
+    opacity: .55; will-change: transform;
+  }
+  .a { background: radial-gradient(circle, #43e8c6 0%, transparent 62%); left: -18vmax; top: -22vmax;
+       animation: drift-a 14s ease-in-out infinite alternate; }
+  .b { background: radial-gradient(circle, #7b6cff 0%, transparent 62%); right: -22vmax; top: -8vmax;
+       animation: drift-b 17s ease-in-out infinite alternate; }
+  .c { background: radial-gradient(circle, #ff8a5b 0%, transparent 60%); left: 8vmax; bottom: -30vmax;
+       animation: drift-c 19s ease-in-out infinite alternate; opacity: .38; }
+  @keyframes drift-a { from { transform: translate(0, 0) scale(1); } to { transform: translate(16vmax, 10vmax) scale(1.15); } }
+  @keyframes drift-b { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-14vmax, 12vmax) scale(.92); } }
+  @keyframes drift-c { from { transform: translate(0, 0) scale(.95); } to { transform: translate(12vmax, -10vmax) scale(1.12); } }
+  .clock {
+    position: absolute; left: 0; right: 0; bottom: 14%; text-align: center;
+    font-weight: 300; font-size: 15vmin; letter-spacing: .02em; text-shadow: 0 2px 14px rgba(0,0,0,.35);
+  }
+  .date { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; font-size: 4.6vmin; opacity: .78; }
+  @media (prefers-reduced-motion: reduce) { .blob { animation: none; } }
+</style>
+</head>
+<body>
+  <div class="blob a"></div>
+  <div class="blob b"></div>
+  <div class="blob c"></div>
+  <div class="clock" id="clock">--:--</div>
+  <div class="date" id="date"></div>
+<script>
+  const clock = document.getElementById("clock");
+  const date = document.getElementById("date");
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  function tick() {
+    const now = new Date();
+    clock.textContent = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    date.textContent = (now.getMonth() + 1) + " 月 " + now.getDate() + " 日 · 星期" + weekdays[now.getDay()];
+  }
+  tick();
+  setInterval(tick, 1000 * 15);
+</script>
+</body>
+</html>

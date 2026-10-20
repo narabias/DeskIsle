@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from deskisle.board import DesktopWindow  # noqa: E402
 from deskisle.island import IslandWidget, CONTENT_TOP  # noqa: E402
+from deskisle.motion import COLLAPSE_MS  # noqa: E402
 from deskisle.models import AppState, IslandState, ItemRef, PageState, Rule, TabState  # noqa: E402
 from deskisle.storage import StateStore  # noqa: E402
 
@@ -46,13 +47,18 @@ class ReleaseTests(unittest.TestCase):
 
         counter = Counter()
         widget.installEventFilter(counter)
-        QTest.qWait(50)
-        self.assertTrue(widget._collapse_animating)
+        # Drive the tween to a fixed mid-collapse point instead of racing a wall
+        # clock: on a fast machine the whole animation can finish inside qWait,
+        # which then indexes pixels outside the shrunken window.
+        widget._collapse_tween.stop()
+        widget._animate_progress(0.5)
+        self.app.processEvents()
         self.assertEqual(counter.resizes, 0)
-        self.assertTrue(44 < widget._visual_height < 480)
+        self.assertGreaterEqual(widget._visual_height, 44)
+        self.assertLessEqual(widget._visual_height, 480)
         self.assertEqual(widget.grab().toImage().pixelColor(20, 470).alpha(), 0)
         widget.toggle_collapsed()
-        QTest.qWait(210)
+        QTest.qWait(COLLAPSE_MS + 100)
         self.assertEqual(widget.height(), 480)
         self.assertEqual(state.height, 480)
         self.assertFalse(state.collapsed)

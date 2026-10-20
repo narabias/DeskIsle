@@ -2,7 +2,7 @@
   #define BuildDir "..\dist\DeskIsle"
 #endif
 #ifndef AppVersion
-  #define AppVersion "1.1.3"
+  #define AppVersion "1.2.1"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -29,6 +29,10 @@ WizardStyle=modern
 DisableProgramGroupPage=yes
 CloseApplications=yes
 RestartApplications=no
+; Updates reuse the previous install folder and choices; user data lives in
+; %LOCALAPPDATA%\DeskIsle and is never touched by the installer.
+UsePreviousAppDir=yes
+UsePreviousTasks=yes
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "ChineseSimplified.isl"
@@ -48,8 +52,15 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\DeskIsle.exe"; Description: "启动桌屿 DeskIsle"; Flags: nowait postinstall skipifsilent
+; In-app update (silent install started by DeskIsle): reopen the app afterwards.
+Filename: "{app}\DeskIsle.exe"; WorkingDir: "{app}"; Flags: nowait; Check: ShouldRelaunchAfterUpdate
 
 [Code]
+function ShouldRelaunchAfterUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:DESKISLERELAUNCH|0}') = '1');
+end;
+
 function ExistingStartup: Boolean;
 begin
   Result := (ExpandConstant('{param:SKIPSTARTUPMIGRATION|0}') <> '1') and

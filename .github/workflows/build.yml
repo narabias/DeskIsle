@@ -33,6 +33,15 @@ jobs:
           python-version: "3.13"
           cache: "pip"
 
+      - name: Check release tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace '^refs/tags/','' } else { '${{ inputs.release }}' }
+          if (($tag -replace '^[vV]','') -ne $version) {
+            throw "Release tag '$tag' does not match VERSION '$version'. Update VERSION first so the in-app updater can find the installer."
+          }
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

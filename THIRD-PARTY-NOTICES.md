@@ -24,6 +24,21 @@ DeskIsle 通过 PyInstaller 的 one-folder 模式打包，Qt 库以**动态链�
 
 如需 Qt/PySide6 源代码，请访问上述项目主页获取。
 
+#### Qt WebEngine（含 Chromium）
+
+- 用途：HTML 动画岛与固定网页岛
+- Qt WebEngine 模块随 PySide6 以 LGPLv3 提供；其中集成的 Chromium 及其依赖（Blink、V8、Skia、ICU 等）
+  分别以 BSD、MIT、LGPL 等各自的许可发布。
+- 完整许可清单：https://doc.qt.io/qt-6/qtwebengine-licensing.html
+- 安装目录中的 `QtWebEngineProcess.exe`、`Qt6WebEngineCore.dll` 及 `resources/` 等文件同样可按上文方式替换。
+
+#### Qt Multimedia 与 FFmpeg
+
+- 用途：背景视频播放（图片背景不依赖它）
+- Qt Multimedia 以 LGPLv3 提供；PySide6 附带的 FFmpeg 动态库（`avcodec-*.dll`、`avformat-*.dll`、
+  `avutil-*.dll`、`swscale-*.dll`、`swresample-*.dll`）以 LGPLv2.1 或更高版本发布，可自行替换。
+- FFmpeg 源代码与许可：https://ffmpeg.org/legal.html
+
 ### pywin32 — PSF 风格许可
 
 - 项目主页：https://github.com/mhammond/pywin32
@@ -50,6 +65,11 @@ DeskIsle 通过 PyInstaller 的 one-folder 模式打包，Qt 库以**动态链�
 - 版权：Copyright (c) 2020-2026 Paweł Kuna
 - 许可全文见 `deskisle/assets/icons/LICENSE-TABLER.txt`
 - 用途：界面图标（`deskisle/assets/icons/*.svg`）
+
+### 界面素材与演示动画
+
+`deskisle/assets/ui/*.svg`（勾选、箭头等小图标）与 `deskisle/assets/demo/aurora.html`（演示用 HTML 动画）
+均为本项目原创，随项目以 MIT 许可发布。
 
 ### 应用图标
 

@@ -7,27 +7,45 @@ import sys
 import weakref
 from pathlib import Path
 
+from collections import OrderedDict
+
 from PySide6.QtCore import (
     QByteArray,
     QFileInfo,
     QMimeData,
     QPoint,
     QProcess,
+    QRectF,
     QSize,
     Qt,
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QDesktopServices, QDrag, QIcon, QMouseEvent
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QDrag,
+    QFontMetricsF,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QTextLayout,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileIconProvider,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QMessageBox,
+    QStyle,
+    QStyledItemDelegate,
 )
+
+from . import motion, theme
+from .widgets import GlassMenu
 
 
 MIME_TYPE = "application/x-deskisle-items"
@@ -65,6 +83,126 @@ def reveal_path(path: str) -> bool:
         return False
 
 
+def grid_for_icon(icon_size: float) -> QSize:
+    size = int(round(icon_size))
+    return QSize(max(86, size + 30), size + 52)
+
+
+class IconDelegate(QStyledItemDelegate):
+    """iOS-style cell: soft rounded highlight, crisp icon, two-line label."""
+
+    def __init__(self, view: "ItemListWidget") -> None:
+        super().__init__(view)
+        self._view = view
+        self._lines: "OrderedDict[tuple, list[str]]" = OrderedDict()
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt API
+        grid = self._view.gridSize()
+        return QSize(max(40, grid.width() - 4), max(40, grid.height() - 4))
+
+    def _wrap(self, text: str, font, width: float) -> list[str]:
+        key = (text, round(width), font.key())
+        lines = self._lines.get(key)
+        if lines is not None:
+            self._lines.move_to_end(key)
+            return lines
+        metrics = QFontMetricsF(font)
+        layout = QTextLayout(text, font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        spans: list[tuple[int, int]] = []
+        while len(spans) < 2:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            spans.append((line.textStart(), line.textLength()))
+        layout.endLayout()
+        lines = []
+        for number, (start, length) in enumerate(spans):
+            if number == 1:
+                lines.append(metrics.elidedText(text[start:], Qt.TextElideMode.ElideRight, width))
+            else:
+                lines.append(text[start:start + length].strip())
+        if not lines:
+            lines = [text]
+        self._lines[key] = lines
+        while len(self._lines) > 2048:
+            self._lines.popitem(last=False)
+        return lines
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        view = self._view
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        rect = QRectF(option.rect).adjusted(2, 2, -2, -2)
+        state = option.state
+        selected = bool(state & QStyle.StateFlag.State_Selected)
+        hovered = bool(state & QStyle.StateFlag.State_MouseOver)
+        if selected:
+            fill = QColor(theme.ACCENT)
+            fill.setAlpha(70 if view.hasFocus() else 52)
+            border = QColor(theme.ACCENT)
+            border.setAlpha(150)
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+        elif hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 24))
+            painter.drawRoundedRect(rect, 12, 12)
+
+        size = float(view.iconSize().width())
+        icon_rect = QRectF(rect.center().x() - size / 2, rect.top() + 7, size, size)
+        available = view.is_available(index)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        scale = view.press_scale(index.row())
+        painter.save()
+        if scale != 1.0:
+            center = icon_rect.center()
+            painter.translate(center)
+            painter.scale(scale, scale)
+            painter.translate(-center)
+        if isinstance(icon, QIcon) and not icon.isNull():
+            ratio = view.devicePixelRatioF()
+            wanted = int(round(size))
+            pixmap = icon.pixmap(QSize(wanted, wanted), ratio)
+            if not pixmap.isNull():
+                if not available:
+                    painter.setOpacity(0.42)
+                # Pixmaps rastered for another size (during a zoom) are
+                # simply scaled; the view re-rasters when the zoom settles.
+                painter.drawPixmap(icon_rect, pixmap, QRectF(pixmap.rect()))
+                painter.setOpacity(1.0)
+        painter.restore()
+
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        if text:
+            font = option.font
+            metrics = QFontMetricsF(font)
+            width = rect.width() - 8
+            lines = self._wrap(text, font, width)
+            top = icon_rect.bottom() + 5
+            color = QColor(theme.TEXT if available else theme.TEXT_TERTIARY)
+            if selected:
+                color = QColor("#FFFFFF")
+            line_height = metrics.height()
+            for number, line in enumerate(lines):
+                line_rect = QRectF(rect.left() + 4, top + number * line_height, width, line_height)
+                if line_rect.bottom() > rect.bottom() + 2:
+                    break
+                if view.text_shadow:
+                    painter.setPen(QColor(0, 0, 0, 150))
+                    painter.drawText(line_rect.translated(0, 1), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
+                painter.setPen(color)
+                painter.drawText(line_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
+        painter.restore()
+
+
 class ItemListWidget(QListWidget):
     """Icon grid shared by normal islands and live folder views."""
 
@@ -76,17 +214,29 @@ class ItemListWidget(QListWidget):
     unavailable_remove_requested = Signal(list)
     blank_double_clicked = Signal()
     blank_context_requested = Signal(QPoint)
+    zoom_requested = Signal(int)
 
     def __init__(self, island_id: str, tab_id: str, parent=None) -> None:
         super().__init__(parent)
         self.island_id = island_id
         self.tab_id = tab_id
         self.portal_mode = False
+        self.text_shadow = False
         self._blank_press_active = False
         self._icon_provider = QFileIconProvider()
         self._icon_cache: dict[tuple[str, int, int, float], QIcon] = {}
         self._records: list[tuple[str, str]] = []
         self._shell_process = None
+        self._missing: set[str] = set()
+        self._zoom_target: int | None = None
+        self._zoom_tween = motion.Tween(self, self._apply_zoom, 56.0, motion.ZOOM_MS, motion.ios_curve())
+        self._press_row = -1
+        self._press_scale = 1.0
+        self._press_tween = motion.Tween(self, self._set_press_scale, 1.0, motion.PRESS_MS, span=0.1)
+        self._wheel_accum = 0
+        self._scroll_tween = motion.Tween(self, self._set_scroll, 0.0, 220, motion.ios_curve())
+        self._scroll_target = 0.0
+        self.setItemDelegate(IconDelegate(self))
 
         self.setViewMode(QListWidget.ViewMode.IconMode)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
@@ -108,29 +258,119 @@ class ItemListWidget(QListWidget):
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.itemDoubleClicked.connect(self._activate_item)
         self.itemSelectionChanged.connect(self._paint_selection_feedback)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setStyleSheet(
             "QListWidget { background: transparent; border: 0; outline: 0; }"
-            "QListWidget::item { color: #F4F7FB; border-radius: 8px; padding: 4px; }"
-            "QListWidget::item:selected { background: rgba(85,214,190,135); border: 1px solid #67E2CB; }"
-            "QListWidget::item:selected:active { background: rgba(85,214,190,165); border: 1px solid #8AF2DF; }"
-            "QListWidget::item:hover { background: rgba(255,255,255,38); border: 1px solid rgba(255,255,255,32); }"
-            "QListWidget::item:pressed { background: rgba(85,214,190,190); border: 1px solid #A2F8E8; }"
-            "QScrollBar:vertical { width: 8px; background: transparent; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,70); border-radius: 4px; min-height: 24px; }"
+            "QScrollBar:vertical { width: 7px; background: transparent; margin: 4px 1px 4px 0; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,60); border-radius: 3px; min-height: 28px; }"
+            "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,110); }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
         )
 
     def configure(self, island_id: str, tab_id: str, icon_size: int, portal_mode: bool) -> None:
         self.island_id = island_id
         self.tab_id = tab_id
         self.portal_mode = portal_mode
+        icon_size = int(icon_size)
+        if self._zoom_target is not None:
+            if icon_size != self._zoom_target:
+                self.animate_icon_size(icon_size)
+            return
         size_changed = self.iconSize() != QSize(icon_size, icon_size)
         self.setIconSize(QSize(icon_size, icon_size))
-        self.setGridSize(QSize(max(86, icon_size + 30), icon_size + 52))
+        self.setGridSize(grid_for_icon(icon_size))
+        self._zoom_tween.value = self._zoom_tween.target = float(icon_size)
         if size_changed:
-            for index in range(self.count()):
-                item = self.item(index)
-                item.setIcon(self._file_icon(item.data(Qt.ItemDataRole.UserRole)))
+            self._reraster_icons()
+
+    def _reraster_icons(self) -> None:
+        for index in range(self.count()):
+            item = self.item(index)
+            item.setIcon(self._file_icon(item.data(Qt.ItemDataRole.UserRole)))
+
+    # Smooth icon zoom -------------------------------------------------
+    def animate_icon_size(self, size: int) -> None:
+        size = int(size)
+        current = self.iconSize().width()
+        if size == current and self._zoom_target is None:
+            return
+        if self._zoom_target is None:
+            self._zoom_tween.value = float(current)
+        self._zoom_target = size
+        self._zoom_tween.to(float(size), motion.ZOOM_MS, motion.ios_curve(), on_finished=self._finish_zoom,
+                            proportional=False)
+
+    def _apply_zoom(self, value: float) -> None:
+        size = max(16, int(round(value)))
+        if self.iconSize().width() != size:
+            self.setIconSize(QSize(size, size))
+            self.setGridSize(grid_for_icon(size))
+
+    def _finish_zoom(self) -> None:
+        target = self._zoom_target
+        self._zoom_target = None
+        if target is None:
+            return
+        self.setIconSize(QSize(target, target))
+        self.setGridSize(grid_for_icon(target))
+        self._reraster_icons()
+        self.viewport().update()
+
+    def is_zooming(self) -> bool:
+        return self._zoom_target is not None
+
+    def set_text_shadow(self, enabled: bool) -> None:
+        if self.text_shadow != bool(enabled):
+            self.text_shadow = bool(enabled)
+            self.viewport().update()
+
+    def is_available(self, index) -> bool:
+        return str(index.data(Qt.ItemDataRole.UserRole) or "") not in self._missing
+
+    # Press feedback ---------------------------------------------------
+    def press_scale(self, row: int) -> float:
+        return self._press_scale if row == self._press_row else 1.0
+
+    def _set_press_scale(self, value: float) -> None:
+        self._press_scale = value
+        item = self.item(self._press_row) if self._press_row >= 0 else None
+        if item is not None:
+            self.viewport().update(self.visualItemRect(item).adjusted(-4, -4, 4, 4))
+
+    def _release_press(self) -> None:
+        if self._press_row >= 0:
+            self._press_tween.to(1.0, motion.RELEASE_MS, motion.spring_curve(1.7), proportional=False)
+
+    # Smooth wheel scrolling -------------------------------------------
+    def _set_scroll(self, value: float) -> None:
+        self.verticalScrollBar().setValue(int(round(value)))
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._wheel_accum += event.angleDelta().y()
+            while abs(self._wheel_accum) >= 60:
+                step = 1 if self._wheel_accum > 0 else -1
+                self._wheel_accum -= 120 * step if abs(self._wheel_accum) >= 120 else 60 * step
+                self.zoom_requested.emit(step)
+            event.accept()
+            return
+        bar = self.verticalScrollBar()
+        if not event.pixelDelta().isNull() or motion.reduce_motion() or bar.maximum() <= 0:
+            self._scroll_tween.stop()
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if not delta:
+            super().wheelEvent(event)
+            return
+        base = self._scroll_target if self._scroll_tween.is_running() else float(bar.value())
+        step = max(40.0, self.gridSize().height() * 0.85)
+        target = max(float(bar.minimum()), min(float(bar.maximum()), base - delta / 120.0 * step))
+        self._scroll_target = target
+        self._scroll_tween.value = float(bar.value())
+        self._scroll_tween.to(target, 220, proportional=False)
+        event.accept()
 
     def _file_icon(self, path: str) -> QIcon:
         size = self.iconSize()
@@ -166,8 +406,11 @@ class ItemListWidget(QListWidget):
             item.setToolTip(path)
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
             if not os.path.exists(path):
+                self._missing.add(path)
                 item.setForeground(Qt.GlobalColor.gray)
                 item.setToolTip(path + "\n位置暂不可用")
+            else:
+                self._missing.discard(path)
             self.addItem(item)
             item.setSelected(path in selected)
         self.verticalScrollBar().setValue(scroll)
@@ -192,9 +435,15 @@ class ItemListWidget(QListWidget):
         self.viewport().update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pressed = self.itemAt(event.position().toPoint())
+        if event.button() == Qt.MouseButton.LeftButton and pressed is not None:
+            self._press_tween.stop()
+            self._press_row = self.row(pressed)
+            self._press_tween.value = self._press_scale = 1.0
+            self._press_tween.to(0.9, motion.PRESS_MS, motion.ios_curve(), proportional=False)
         if (
             event.button() == Qt.MouseButton.LeftButton
-            and self.itemAt(event.position().toPoint()) is None
+            and pressed is None
         ):
             self.clearSelection()
             self.setCurrentItem(None)
@@ -212,6 +461,7 @@ class ItemListWidget(QListWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._release_press()
         if event.button() == Qt.MouseButton.LeftButton and self._blank_press_active:
             self._blank_press_active = False
             event.accept()
@@ -219,6 +469,7 @@ class ItemListWidget(QListWidget):
         super().mouseReleaseEvent(event)
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802 - Qt API
+        self._release_press()
         paths = self.selected_paths()
         if not paths:
             return
@@ -315,7 +566,7 @@ class ItemListWidget(QListWidget):
             return
         unavailable = [path for path in paths if not os.path.lexists(path)]
         if unavailable:
-            menu = QMenu()
+            menu = GlassMenu(passive=True)
             menu.addAction('所选项目的位置已不可用').setEnabled(False)
             remove = menu.addAction('移除失效引用（不删除文件）')
             if menu.exec(self.viewport().mapToGlobal(point)) == remove:
@@ -326,9 +577,7 @@ class ItemListWidget(QListWidget):
             return
         # Keep the popup independent from the monitor-sized desktop HWND.
         # Wallpaper tools may classify a popup by its Win32 root-owner.
-        menu = QMenu()
-        menu.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        menu.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        menu = GlassMenu(passive=True)
         open_action = menu.addAction("打开")
         reveal_action = menu.addAction("在资源管理器中显示")
         copy_path_action = menu.addAction("复制路径")

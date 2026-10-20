@@ -810,6 +810,116 @@ def add_to_startup(executable: os.PathLike[str] | str, enabled: bool, arguments=
         return False
 
 
+WM_SETTINGCHANGE: Final = 0x001A
+SPI_SETDESKWALLPAPER: Final = 0x0014
+_SPI_GETDESKWALLPAPER = 0x0073
+_WALLPAPER_STYLES = {"0": "center", "2": "stretch", "6": "fit", "10": "fill", "22": "span"}
+_IGNORED_FOREGROUND_CLASSES = {
+    "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+    "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland",
+}
+_extra_prototypes_ready = False
+
+
+def _ensure_extra_prototypes() -> None:
+    global _extra_prototypes_ready
+    if _extra_prototypes_ready or not _IS_WINDOWS:
+        return
+    _user32.GetForegroundWindow.argtypes = []
+    _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    _user32.GetClassNameW.restype = ctypes.c_int
+    _user32.IsIconic.argtypes = [wintypes.HWND]
+    _user32.IsIconic.restype = wintypes.BOOL
+    _user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+    _user32.SystemParametersInfoW.restype = wintypes.BOOL
+    _extra_prototypes_ready = True
+
+
+def get_wallpaper_info() -> dict:
+    """Return the current wallpaper path, placement style and fill colour.
+
+    Used only to *paint* frosted/liquid glass behind islands; nothing is
+    written.  Dynamic wallpaper tools (video wallpapers) are not visible here,
+    so the static Windows wallpaper is used as the glass source.
+    """
+    info = {"path": "", "style": "fill", "color": "#000000"}
+    if not _IS_WINDOWS:
+        return info
+    try:
+        _ensure_extra_prototypes()
+        buffer = ctypes.create_unicode_buffer(1024)
+        if _user32.SystemParametersInfoW(_SPI_GETDESKWALLPAPER, len(buffer), buffer, 0):
+            info["path"] = buffer.value
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as key:
+            try:
+                style = str(winreg.QueryValueEx(key, "WallpaperStyle")[0]).strip()
+            except OSError:
+                style = "10"
+            try:
+                tile = str(winreg.QueryValueEx(key, "TileWallpaper")[0]).strip()
+            except OSError:
+                tile = "0"
+        info["style"] = "tile" if tile == "1" and style == "0" else _WALLPAPER_STYLES.get(style, "fill")
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Colors") as key:
+                parts = [int(part) for part in str(winreg.QueryValueEx(key, "Background")[0]).split()[:3]]
+                if len(parts) == 3:
+                    info["color"] = "#{0:02X}{1:02X}{2:02X}".format(*parts)
+        except (OSError, ValueError):
+            pass
+    except Exception:
+        pass
+    if not info["path"] or not os.path.isfile(info["path"]):
+        appdata = os.environ.get("APPDATA", "")
+        transcoded = Path(appdata) / "Microsoft" / "Windows" / "Themes" / "TranscodedWallpaper"
+        if appdata and transcoded.is_file():
+            info["path"] = str(transcoded)
+    return info
+
+
+def is_window_covered(hwnd: int, tolerance: int = 12) -> bool:
+    """True when another application's window fully covers *hwnd*.
+
+    Used for “智能暂停”: videos and HTML animations stop when nobody can see
+    them (e.g. a maximised or fullscreen application is in front).
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        _ensure_extra_prototypes()
+        hwnd = int(hwnd)
+        foreground = _handle_value(_user32.GetForegroundWindow())
+        if not foreground or foreground == hwnd or not _window_is_valid(hwnd):
+            return False
+        pid = wintypes.DWORD(0)
+        _user32.GetWindowThreadProcessId(_as_hwnd(foreground), ctypes.byref(pid))
+        if int(pid.value) == os.getpid():
+            return False
+        name = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(_as_hwnd(foreground), name, 128)
+        if name.value in _IGNORED_FOREGROUND_CLASSES:
+            return False
+        if _user32.IsIconic(_as_hwnd(foreground)) or not _user32.IsWindowVisible(_as_hwnd(foreground)):
+            return False
+        front = wintypes.RECT()
+        mine = wintypes.RECT()
+        if not _user32.GetWindowRect(_as_hwnd(foreground), ctypes.byref(front)):
+            return False
+        if not _user32.GetWindowRect(_as_hwnd(hwnd), ctypes.byref(mine)):
+            return False
+        return (
+            front.left - tolerance <= mine.left
+            and front.top - tolerance <= mine.top
+            and front.right + tolerance >= mine.right
+            and front.bottom + tolerance >= mine.bottom
+        )
+    except Exception:
+        return False
+
+
 class DesktopHost:
     """Convenience owner for the native state associated with one HWND."""
 

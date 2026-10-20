@@ -17,6 +17,17 @@ $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Tr
 if ($version -notmatch '^\d+(\.\d+){1,3}$') { throw 'Invalid VERSION file.' }
 New-Item -ItemType Directory -Force $logRoot, $OutputDir | Out-Null
 
+# The in-app updater compares GitHub release tags with deskisle.__version__,
+# so keep it in sync with VERSION (otherwise every build would offer itself
+# as an update).
+$initPath = Join-Path $projectRoot 'deskisle\__init__.py'
+$initText = [IO.File]::ReadAllText($initPath)
+$stampedText = [regex]::Replace($initText, '__version__\s*=\s*"[^"]*"', ('__version__ = "' + $version + '"'))
+if ($stampedText -ne $initText) {
+    [IO.File]::WriteAllText($initPath, $stampedText, (New-Object Text.UTF8Encoding($false)))
+    Write-Host "[version] deskisle/__init__.py -> $version" -ForegroundColor Yellow
+}
+
 function Invoke-Checked {
     param([string]$Program, [string[]]$ArgumentList, [string]$Stage)
     $logPath = Join-Path $logRoot ($Stage + '.log')
@@ -41,7 +52,7 @@ try {
     $Python = $pythonCommand.Source
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $Python -c "import PySide6, PyInstaller, PIL, win32gui, pythoncom" 2>$null
+    & $Python -c "import PySide6, PySide6.QtWebEngineWidgets, PySide6.QtMultimedia, PyInstaller, PIL, win32gui, pythoncom" 2>$null
     $dependencyExit = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
     if ($dependencyExit -ne 0) {

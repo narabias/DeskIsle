@@ -1,3 +1,9 @@
+"""Dialogs: new island, appearance, settings, rules, snapshots, updates.
+
+The look follows iOS “grouped” settings: dark rounded cards, switches,
+segmented controls and short helper text below each group.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -6,112 +12,199 @@ import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
+    QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import __version__
+from . import __version__, motion, theme
 from .models import Preferences, Rule
-from .theme import ACCENT, APP_NAME, TEXT_MUTED, app_stylesheet
+from .theme import (
+    ACCENT,
+    APP_NAME,
+    SURFACE,
+    SURFACE_ALT,
+    TEXT,
+    TEXT_MUTED,
+    TINT_SWATCHES,
+    app_stylesheet,
+)
+from .widgets import SegmentedControl, ToggleSwitch
 
 
 _DIALOG_STYLESHEET = f"""
 QDialog {{
-    background: #151B25;
+    background: {SURFACE};
 }}
 QLabel#dialogTitle {{
-    color: #F8FAFD;
-    font-size: 18pt;
-    font-weight: 650;
+    color: {TEXT};
+    font-size: 17pt;
+    font-weight: 700;
 }}
 QLabel#dialogSubtitle, QLabel#helpText {{
     color: {TEXT_MUTED};
 }}
-QLabel#errorText {{
-    color: #FF9DA5;
+QLabel#helpText {{
+    font-size: 8.8pt;
 }}
-QFrame#typeCard, QFrame#summaryCard {{
-    background: #1C2532;
-    border: 1px solid #344256;
-    border-radius: 11px;
+QLabel#sectionTitle {{
+    color: {TEXT_MUTED};
+    font-size: 8.8pt;
+    font-weight: 600;
+    padding-left: 14px;
+}}
+QLabel#rowLabel {{
+    color: {TEXT};
+}}
+QLabel#valueLabel {{
+    color: {TEXT_MUTED};
+}}
+QLabel#errorText {{
+    color: #FF6961;
+}}
+QLabel#pageTitle {{
+    color: {TEXT};
+    font-size: 14pt;
+    font-weight: 700;
+}}
+QFrame#typeCard, QFrame#summaryCard, QFrame#groupCard {{
+    background: {SURFACE_ALT};
+    border: 1px solid rgba(255,255,255,14);
+    border-radius: 13px;
 }}
 QFrame#typeCard:hover {{
-    border-color: {ACCENT};
-    background: #202D3A;
+    background: #323236;
+}}
+QFrame#typeCard[selected="true"] {{
+    background: #26332F;
+    border: 1px solid {ACCENT};
+}}
+QFrame#rowSeparator {{
+    background: rgba(255,255,255,20);
+    border: 0;
+    min-height: 1px;
+    max-height: 1px;
 }}
 QGroupBox {{
-    border: 1px solid #344256;
-    border-radius: 10px;
-    margin-top: 13px;
+    background: {SURFACE_ALT};
+    border: 1px solid rgba(255,255,255,14);
+    border-radius: 13px;
+    margin-top: 16px;
     padding: 14px 12px 10px 12px;
     font-weight: 600;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     left: 12px;
-    padding: 0 6px;
-    color: #DCE5F1;
+    padding: 0 4px;
+    color: {TEXT_MUTED};
 }}
 QTreeWidget {{
-    background: #1B2431;
-    alternate-background-color: #202B3A;
-    border: 1px solid #344256;
-    border-radius: 9px;
+    background: {SURFACE_ALT};
+    alternate-background-color: #303034;
+    border: 1px solid rgba(255,255,255,14);
+    border-radius: 12px;
     outline: 0;
 }}
 QTreeWidget::item {{
     padding: 7px 5px;
 }}
 QTreeWidget::item:selected {{
-    background: #31554F;
+    background: rgba(85,214,190,70);
+    color: white;
 }}
 QHeaderView::section {{
-    color: #BFC9D7;
-    background: #202938;
+    color: {TEXT_MUTED};
+    background: transparent;
     border: 0;
-    border-bottom: 1px solid #344256;
+    border-bottom: 1px solid rgba(255,255,255,20);
     padding: 7px;
 }}
-QSlider::groove:horizontal {{
-    height: 5px;
-    background: #344256;
-    border-radius: 2px;
+QListWidget#settingsNav {{
+    background: transparent;
+    border: 0;
+    outline: 0;
+    padding: 0;
 }}
-QSlider::handle:horizontal {{
-    width: 16px;
-    margin: -6px 0;
+QListWidget#settingsNav::item {{
+    padding: 9px 12px;
+    margin: 1px 0;
+    border-radius: 9px;
+    color: {TEXT};
+}}
+QListWidget#settingsNav::item:selected {{
+    background: rgba(255,255,255,32);
+    color: white;
+}}
+QListWidget#settingsNav::item:hover:!selected {{
+    background: rgba(255,255,255,14);
+}}
+QFrame#navPanel {{
+    background: #232325;
+    border-right: 1px solid rgba(255,255,255,14);
+}}
+QProgressBar {{
+    background: rgba(255,255,255,28);
+    border: 0;
+    border-radius: 3px;
+    max-height: 6px;
+    min-height: 6px;
+    text-align: center;
+}}
+QProgressBar::chunk {{
     background: {ACCENT};
-    border-radius: 8px;
+    border-radius: 3px;
 }}
-QSlider::sub-page:horizontal {{
-    background: #3E8F83;
-    border-radius: 2px;
+QTextBrowser {{
+    background: {SURFACE_ALT};
+    border: 1px solid rgba(255,255,255,14);
+    border-radius: 12px;
+    padding: 8px 10px;
+}}
+QPushButton#linkButton {{
+    background: transparent;
+    color: {ACCENT};
+    padding: 4px 6px;
+}}
+QScrollArea#pageScroll, QScrollArea#pageScroll > QWidget, QWidget#settingsPage {{
+    background: transparent;
+}}
+QPushButton#linkButton:hover {{
+    color: #8CF0DE;
 }}
 """
 
@@ -133,6 +226,10 @@ _KIND_OPTIONS = (
     ("archive", "压缩包"),
 )
 
+MATERIAL_CHOICES = (("clear", "简易透明"), ("frosted", "毛玻璃"), ("liquid", "液体玻璃"))
+GRID_MOVE_CHOICES = (("swap", "交换位置"), ("reorder", "依次后移"))
+FPS_CHOICES = (15, 24, 30, 60)
+
 
 def _prepare_dialog(dialog: QDialog, width: int, height: int | None = None) -> None:
     dialog.setStyleSheet(app_stylesheet() + _DIALOG_STYLESHEET)
@@ -140,6 +237,28 @@ def _prepare_dialog(dialog: QDialog, width: int, height: int | None = None) -> N
     if height is not None:
         dialog.setMinimumHeight(height)
     dialog.setWindowModality(Qt.WindowModality.WindowModal)
+
+
+def _fit_to_contents(dialog: QDialog) -> None:
+    """Resize *dialog* so word-wrapped labels get their full height.
+
+    Top-level windows ignore height-for-width, so a plain ``adjustSize()``
+    leaves wrapped help text (or the rows next to it) slightly squeezed.
+    """
+    layout = dialog.layout()
+    if layout is None:
+        return
+    layout.activate()
+    width = max(dialog.minimumWidth(), layout.totalMinimumSize().width())
+    if layout.hasHeightForWidth():
+        height = layout.totalHeightForWidth(width)
+    else:
+        height = layout.totalSizeHint().height()
+    height = max(height, dialog.minimumHeight(), layout.totalMinimumSize().height())
+    screen = dialog.screen()
+    if screen is not None:
+        height = min(height, max(320, screen.availableGeometry().height() - 48))
+    dialog.resize(width, height)
 
 
 def _heading(title: str, subtitle: str = "") -> QVBoxLayout:
@@ -160,6 +279,70 @@ def _primary_button(button_box: QDialogButtonBox) -> None:
     button = button_box.button(QDialogButtonBox.StandardButton.Ok)
     if button is not None:
         button.setObjectName("primary")
+
+
+def _help(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("helpText")
+    label.setWordWrap(True)
+    return label
+
+
+def _section(title: str) -> QLabel:
+    label = QLabel(title)
+    label.setObjectName("sectionTitle")
+    label.setContentsMargins(0, 6, 0, 0)
+    return label
+
+
+def _separator() -> QFrame:
+    line = QFrame()
+    line.setObjectName("rowSeparator")
+    line.setFrameShape(QFrame.Shape.NoFrame)
+    return line
+
+
+def _group(*rows: QWidget, margins: tuple[int, int, int, int] = (14, 6, 14, 6)) -> QFrame:
+    """iOS grouped card: rows separated by hairlines."""
+    frame = QFrame()
+    frame.setObjectName("groupCard")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(*margins)
+    layout.setSpacing(0)
+    for index, row in enumerate(rows):
+        if index:
+            layout.addWidget(_separator())
+        layout.addWidget(row)
+    return frame
+
+
+def _row(label: str, widget: QWidget | None = None, *, stretch_widget: bool = False) -> QWidget:
+    row = QWidget()
+    row.setMinimumHeight(42)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 6, 0, 6)
+    layout.setSpacing(12)
+    text = QLabel(label)
+    text.setObjectName("rowLabel")
+    layout.addWidget(text)
+    if widget is not None:
+        if stretch_widget:
+            layout.addWidget(widget, 1)
+        else:
+            layout.addStretch(1)
+            layout.addWidget(widget)
+    else:
+        layout.addStretch(1)
+    return row
+
+
+def _switch_row(switch: ToggleSwitch) -> QWidget:
+    row = QWidget()
+    row.setMinimumHeight(42)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 4, 0, 4)
+    layout.addWidget(switch)
+    return row
 
 
 def _island_id(island: Any) -> str:
@@ -196,50 +379,130 @@ def _replace_rule(rule: Rule, **changes: Any) -> Rule:
         return updated
 
 
+class _FadeStack(QStackedWidget):
+    """Stacked pages that cross-fade in quickly (no effect when idle)."""
+
+    def set_page(self, index: int) -> None:
+        if index == self.currentIndex():
+            return
+        self.setCurrentIndex(index)
+        page = self.currentWidget()
+        if page is None or motion.reduce_motion():
+            return
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", page)
+        animation.setDuration(motion.duration(motion.FADE_MS))
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def done(page=page) -> None:
+            try:
+                page.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
+
+        animation.finished.connect(done)
+        animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+class _ChoiceCard(QFrame):
+    """A selectable card; clicking anywhere selects its radio button."""
+
+    def __init__(self, title: str, description: str, glyph: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("typeCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(86)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._glyph = glyph
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(52, 12, 14, 12)
+        layout.setSpacing(4)
+        self.radio = QRadioButton(title)
+        self.radio.setStyleSheet("QRadioButton { font-size: 10.5pt; font-weight: 600; }")
+        self.radio.toggled.connect(self._sync)
+        help_label = _help(description)
+        layout.addWidget(self.radio)
+        layout.addWidget(help_label)
+        layout.addStretch(1)
+        self._sync(False)
+
+    def _sync(self, checked: bool) -> None:
+        self.setProperty("selected", "true" if checked else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.radio.setChecked(True)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        from .widgets import draw_glyph
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        tile = self.rect().adjusted(14, 14, 0, 0)
+        tile.setSize(QSize(28, 28))
+        color = QColor(ACCENT) if self.radio.isChecked() else QColor(255, 255, 255, 40)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(tile, 8, 8)
+        glyph_color = QColor("#0E1F1C") if self.radio.isChecked() else QColor(245, 245, 247, 220)
+        draw_glyph(painter, self._glyph, tile.toRectF().adjusted(6, 6, -6, -6), glyph_color, width=1.7)
+        painter.end()
+
+
 class NewIslandDialog(QDialog):
-    """Create either a reference-only island or a live folder portal."""
+    """Create a reference island, a folder portal, an HTML animation or a pinned web page."""
+
+    KINDS = ("normal", "portal", "html", "web")
 
     def __init__(
         self,
         parent: QWidget | None = None,
         force_portal: bool | None = None,
+        kind: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("新建收纳岛")
-        _prepare_dialog(self, 560)
+        _prepare_dialog(self, 600)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 22, 24, 20)
-        root.setSpacing(17)
-        root.addLayout(_heading("新建收纳岛", "选择一种内容来源。普通收纳岛只保存引用，不会移动原文件。"))
+        root.setSpacing(16)
+        root.addLayout(_heading("新建收纳岛", "选择一种内容。普通收纳岛只保存引用，不会移动原文件。"))
 
-        choices = QHBoxLayout()
-        choices.setSpacing(12)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
         self.type_group = QButtonGroup(self)
-        self.normal_radio = self._type_card(
-            choices,
-            "普通收纳岛",
-            "整理桌面上的文件、文件夹与快捷方式",
-            checked=True,
-        )
-        self.portal_radio = self._type_card(
-            choices,
-            "文件视窗",
-            "在桌面实时查看一个文件夹的内容",
-        )
-        self.type_group.addButton(self.normal_radio, 0)
-        self.type_group.addButton(self.portal_radio, 1)
-        if force_portal is not None:
-            self.portal_radio.setChecked(bool(force_portal))
-            self.normal_radio.setChecked(not bool(force_portal))
-        root.addLayout(choices)
+        self.normal_card = _ChoiceCard("普通收纳岛", "整理桌面上的文件、文件夹与快捷方式", "grid")
+        self.portal_card = _ChoiceCard("文件视窗", "在桌面实时查看一个文件夹的内容", "folder")
+        self.html_card = _ChoiceCard("HTML 动画", "打开本地 HTML 文件并持续播放其中的动画", "sparkle")
+        self.web_card = _ChoiceCard("固定网页", "把一个网页固定在桌面，可登录、自动刷新", "globe")
+        self.normal_radio = self.normal_card.radio
+        self.portal_radio = self.portal_card.radio
+        self.html_radio = self.html_card.radio
+        self.web_radio = self.web_card.radio
+        for index, card in enumerate((self.normal_card, self.portal_card, self.html_card, self.web_card)):
+            self.type_group.addButton(card.radio, index)
+            grid.addWidget(card, index // 2, index % 2)
+        root.addLayout(grid)
 
         form_frame = QFrame()
         form_frame.setObjectName("summaryCard")
         form = QGridLayout(form_frame)
-        form.setContentsMargins(16, 15, 16, 15)
+        form.setContentsMargins(16, 14, 16, 14)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(12)
+        form.setColumnStretch(1, 1)
 
         form.addWidget(QLabel("名称"), 0, 0)
         self.name_edit = QLineEdit()
@@ -256,7 +519,29 @@ class NewIslandDialog(QDialog):
         self.browse_button = QPushButton("选择…")
         self.browse_button.clicked.connect(self._choose_folder)
         form.addWidget(self.browse_button, 1, 2)
+
+        self.html_label = QLabel("HTML 文件")
+        form.addWidget(self.html_label, 2, 0)
+        self.html_edit = QLineEdit()
+        self.html_edit.setPlaceholderText("选择 .html / .htm 文件")
+        self.html_edit.setClearButtonEnabled(True)
+        form.addWidget(self.html_edit, 2, 1)
+        self.html_browse_button = QPushButton("选择…")
+        self.html_browse_button.clicked.connect(self._choose_html)
+        form.addWidget(self.html_browse_button, 2, 2)
+        self.html_network_check = QCheckBox("允许页面联网（默认离线，更安全）")
+        form.addWidget(self.html_network_check, 3, 1, 1, 2)
+
+        self.url_label = QLabel("网址")
+        form.addWidget(self.url_label, 4, 0)
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("例如：https://calendar.google.com 或输入关键词搜索")
+        self.url_edit.setClearButtonEnabled(True)
+        form.addWidget(self.url_edit, 4, 1, 1, 2)
         root.addWidget(form_frame)
+
+        self.kind_hint = _help("")
+        root.addWidget(self.kind_hint)
 
         self.error_label = QLabel()
         self.error_label.setObjectName("errorText")
@@ -274,41 +559,46 @@ class NewIslandDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+        wanted = kind if kind in self.KINDS else None
+        if wanted is None and force_portal is not None:
+            wanted = "portal" if force_portal else "normal"
+        {"normal": self.normal_radio, "portal": self.portal_radio, "html": self.html_radio,
+         "web": self.web_radio}.get(wanted or "normal").setChecked(True)
+
         self.type_group.idToggled.connect(lambda _id, _checked: self._sync_type())
         self.name_edit.returnPressed.connect(self._validate_and_accept)
+        self.url_edit.returnPressed.connect(self._validate_and_accept)
         self._sync_type()
         self.name_edit.setFocus()
 
-    def _type_card(
-        self,
-        layout: QHBoxLayout,
-        title: str,
-        description: str,
-        checked: bool = False,
-    ) -> QRadioButton:
-        frame = QFrame()
-        frame.setObjectName("typeCard")
-        card = QVBoxLayout(frame)
-        card.setContentsMargins(15, 13, 15, 13)
-        card.setSpacing(5)
-        radio = QRadioButton(title)
-        radio.setChecked(checked)
-        radio.setStyleSheet("QRadioButton { font-size: 11pt; font-weight: 600; }")
-        help_label = QLabel(description)
-        help_label.setObjectName("helpText")
-        help_label.setWordWrap(True)
-        card.addWidget(radio)
-        card.addWidget(help_label)
-        layout.addWidget(frame, 1)
-        return radio
+    def selected_kind(self) -> str:
+        if self.portal_radio.isChecked():
+            return "portal"
+        if self.html_radio.isChecked():
+            return "html"
+        if self.web_radio.isChecked():
+            return "web"
+        return "normal"
 
     def _sync_type(self) -> None:
-        portal = self.portal_radio.isChecked()
-        self.folder_label.setEnabled(portal)
-        self.folder_edit.setEnabled(portal)
-        self.browse_button.setEnabled(portal)
-        if not portal:
-            self.error_label.hide()
+        kind = self.selected_kind()
+        portal = kind == "portal"
+        for widget in (self.folder_label, self.folder_edit, self.browse_button):
+            widget.setVisible(portal)
+            widget.setEnabled(portal)
+        for widget in (self.html_label, self.html_edit, self.html_browse_button, self.html_network_check):
+            widget.setVisible(kind == "html")
+        for widget in (self.url_label, self.url_edit):
+            widget.setVisible(kind == "web")
+        hints = {
+            "normal": "把文件拖进收纳岛即可整理；原文件保持在原处。",
+            "portal": "文件视窗显示真实文件夹，在其中删除或重命名会作用于原文件。",
+            "html": "适合放置 CSS / Canvas / WebGL 动画。页面默认离线运行，不会访问网络。",
+            "web": "网页在独立的浏览器配置中运行，登录状态会保留；新窗口链接会用系统浏览器打开。",
+        }
+        self.kind_hint.setText(hints[kind])
+        self.error_label.hide()
+        _fit_to_contents(self)
 
     def _choose_folder(self) -> None:
         start = self.folder_edit.text().strip() or str(Path.home())
@@ -319,13 +609,31 @@ class NewIslandDialog(QDialog):
         if not self.name_edit.text().strip():
             self.name_edit.setText(Path(folder).name or "文件视窗")
 
+    def _choose_html(self) -> None:
+        from .html_view import HTML_FILTER
+
+        start = os.path.dirname(self.html_edit.text().strip()) or str(Path.home())
+        path, _filter = QFileDialog.getOpenFileName(self, "选择 HTML 文件", start, HTML_FILTER)
+        if not path:
+            return
+        self.html_edit.setText(os.path.normpath(path))
+        if not self.name_edit.text().strip():
+            self.name_edit.setText(Path(path).stem or "HTML 动画")
+
     def _validate_and_accept(self) -> None:
+        kind = self.selected_kind()
         name = self.name_edit.text().strip()
+        if kind == "web" and not name and self.url_edit.text().strip():
+            name = QUrl.fromUserInput(self.url_edit.text().strip()).host() or "固定网页"
+            self.name_edit.setText(name)
+        if kind == "html" and not name and self.html_edit.text().strip():
+            name = Path(self.html_edit.text().strip()).stem or "HTML 动画"
+            self.name_edit.setText(name)
         if not name:
             self._show_error("请输入收纳岛名称。")
             self.name_edit.setFocus()
             return
-        if self.portal_radio.isChecked():
+        if kind == "portal":
             folder = os.path.expandvars(os.path.expanduser(self.folder_edit.text().strip()))
             if not folder:
                 self._show_error("请选择文件视窗要显示的文件夹。")
@@ -336,6 +644,22 @@ class NewIslandDialog(QDialog):
                 self.folder_edit.setFocus()
                 return
             self.folder_edit.setText(os.path.normpath(folder))
+        elif kind == "html":
+            path = os.path.expandvars(os.path.expanduser(self.html_edit.text().strip()))
+            if not path or not os.path.isfile(path):
+                self._show_error("请选择一个存在的 HTML 文件。")
+                self.html_edit.setFocus()
+                return
+            self.html_edit.setText(os.path.normpath(path))
+        elif kind == "web":
+            from .html_view import normalize_url
+
+            url = normalize_url(self.url_edit.text())
+            if not url:
+                self._show_error("请输入要固定的网址。")
+                self.url_edit.setFocus()
+                return
+            self.url_edit.setText(url)
         self.error_label.hide()
         self.accept()
 
@@ -344,13 +668,15 @@ class NewIslandDialog(QDialog):
         self.error_label.show()
 
     def data(self) -> dict[str, Any]:
-        portal = self.portal_radio.isChecked()
-        kind = "portal" if portal else "normal"
+        kind = self.selected_kind()
+        portal = kind == "portal"
         path = self.folder_edit.text().strip() if portal else ""
         title = self.name_edit.text().strip()
+        island_kind = {"html": "html", "web": "web"}.get(kind, "files")
         return {
             "kind": kind,
             "type": kind,
+            "island_kind": island_kind,
             "title": title,
             "name": title,
             "folder": path,
@@ -358,14 +684,18 @@ class NewIslandDialog(QDialog):
             "portal_path": path or None,
             "path": path,
             "is_portal": portal,
+            "html_path": self.html_edit.text().strip() if kind == "html" else "",
+            "html_allow_network": bool(self.html_network_check.isChecked()) if kind == "html" else False,
+            "web_url": self.url_edit.text().strip() if kind == "web" else "",
         }
 
     @staticmethod
     def get_data(
         parent: QWidget | None = None,
         force_portal: bool | None = None,
+        kind: str | None = None,
     ) -> dict[str, Any] | None:
-        dialog = NewIslandDialog(parent, force_portal)
+        dialog = NewIslandDialog(parent, force_portal, kind)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return dialog.data()
         return None
@@ -898,74 +1228,332 @@ class RulesDialog(QDialog):
         self.apply_requested.emit()
 
 
+
+
+class _Swatch(QAbstractButton):
+    """Round colour chip used for island tints."""
+
+    def __init__(self, color: str, parent: QWidget | None = None, *, custom: bool = False) -> None:
+        super().__init__(parent)
+        self.color = color
+        self.custom = custom
+        self.setCheckable(True)
+        self.setFixedSize(32, 32)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("自定义颜色…" if custom else color)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+
+    def set_color(self, color: str) -> None:
+        self.color = color
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtCore import QRectF
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        chip = QRectF(self.rect()).adjusted(5, 5, -5, -5)
+        if self.custom and not self.isChecked():
+            pen = QPen(QColor(255, 255, 255, 120), 1.4, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(chip)
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            center = chip.center()
+            painter.drawLine(center.x() - 4, center.y(), center.x() + 4, center.y())
+            painter.drawLine(center.x(), center.y() - 4, center.x(), center.y() + 4)
+        else:
+            painter.setPen(QPen(QColor(255, 255, 255, 46), 1))
+            painter.setBrush(QColor(self.color))
+            painter.drawEllipse(chip)
+        if self.isChecked():
+            painter.setPen(QPen(QColor(ACCENT), 2.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5))
+        painter.end()
+
+
+class IslandAppearanceDialog(QDialog):
+    """Name, glass material, tint and background media of one island.
+
+    Every change is previewed live through *preview*; the caller restores the
+    original values when the dialog is cancelled.
+    """
+
+    MATERIAL_VALUES = ("", "clear", "frosted", "liquid")
+
+    def __init__(self, state: Any, default_material: str = "frosted", preview: Callable[[dict], None] | None = None,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._preview = preview
+        self._media_path = str(_record_value(state, "media_path", "") or "")
+        self._color = str(_record_value(state, "color", TINT_SWATCHES[0]) or TINT_SWATCHES[0])
+        self.setWindowTitle("外观与名称")
+        _prepare_dialog(self, 560)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 18)
+        root.setSpacing(8)
+        root.addLayout(_heading("外观与名称", "修改会立即预览；点“完成”保存，点“取消”还原。"))
+
+        self.name_edit = QLineEdit(str(_record_value(state, "title", "")))
+        self.name_edit.setPlaceholderText("收纳岛名称")
+        self.name_edit.setClearButtonEnabled(True)
+        self.name_edit.setMaxLength(60)
+        root.addWidget(_section("名称"))
+        root.addWidget(_group(self.name_edit, margins=(10, 10, 10, 10)))
+
+        global_label = dict(MATERIAL_CHOICES).get(default_material, "毛玻璃")
+        self.material_control = SegmentedControl(["跟随全局", "简易透明", "毛玻璃", "液体玻璃"])
+        current_material = str(_record_value(state, "material", "") or "")
+        self.material_control.setCurrentIndex(
+            self.MATERIAL_VALUES.index(current_material) if current_material in self.MATERIAL_VALUES else 0,
+            animate=False)
+        root.addWidget(_section("背景质感"))
+        root.addWidget(_group(self.material_control, margins=(10, 10, 10, 10)))
+        root.addWidget(_help("“跟随全局”当前为{0}。简易透明最省资源，液体玻璃更通透并带折射高光。".format(global_label)))
+
+        swatch_row = QWidget()
+        swatch_layout = QHBoxLayout(swatch_row)
+        swatch_layout.setContentsMargins(0, 4, 0, 4)
+        swatch_layout.setSpacing(2)
+        self.swatch_group = QButtonGroup(self)
+        self.swatch_group.setExclusive(True)
+        self.swatches: list[_Swatch] = []
+        for color in TINT_SWATCHES:
+            swatch = _Swatch(color)
+            swatch.clicked.connect(lambda _checked=False, c=color: self._pick_color(c))
+            self.swatch_group.addButton(swatch)
+            self.swatches.append(swatch)
+            swatch_layout.addWidget(swatch)
+        self.custom_swatch = _Swatch(self._color, custom=True)
+        self.custom_swatch.clicked.connect(self._choose_custom_color)
+        self.swatch_group.addButton(self.custom_swatch)
+        swatch_layout.addWidget(self.custom_swatch)
+        swatch_layout.addStretch(1)
+        root.addWidget(_section("色调"))
+        root.addWidget(_group(swatch_row))
+
+        media_row = QWidget()
+        media_layout = QHBoxLayout(media_row)
+        media_layout.setContentsMargins(0, 6, 0, 6)
+        media_layout.setSpacing(8)
+        self.media_label = QLabel()
+        self.media_label.setObjectName("valueLabel")
+        self.media_label.setMinimumWidth(160)
+        self.media_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.media_button = QPushButton("选择图片或视频…")
+        self.clear_media_button = QPushButton("移除")
+        self.clear_media_button.setObjectName("danger")
+        media_layout.addWidget(self.media_label, 1)
+        media_layout.addWidget(self.media_button)
+        media_layout.addWidget(self.clear_media_button)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(round(float(_record_value(state, "media_opacity", 0.9) or 0.9) * 100))
+        self.opacity_value = QLabel()
+        self.opacity_value.setObjectName("valueLabel")
+        self.opacity_value.setMinimumWidth(44)
+        self.feather_slider = QSlider(Qt.Orientation.Horizontal)
+        self.feather_slider.setRange(0, 100)
+        self.feather_slider.setValue(int(_record_value(state, "media_feather", 26) or 0))
+        self.feather_value = QLabel()
+        self.feather_value.setObjectName("valueLabel")
+        self.feather_value.setMinimumWidth(44)
+        opacity_row = self._slider_row("融合度", self.opacity_slider, self.opacity_value)
+        feather_row = self._slider_row("边缘虚化", self.feather_slider, self.feather_value)
+        root.addWidget(_section("背景媒体"))
+        root.addWidget(_group(media_row, opacity_row, feather_row))
+        root.addWidget(_help("支持图片（PNG / JPG / GIF / WebP）和视频（MP4 / WebM 等，静音循环）。"
+                             "媒体位于玻璃之上、图标之下，边缘向内虚化融入背景，收拢后也会显示。"))
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("完成")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        _primary_button(buttons)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("errorText")
+        self.error_label.hide()
+        root.addWidget(self.error_label)
+
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(40)
+        self._preview_timer.timeout.connect(self._emit_preview)
+
+        self.name_edit.textChanged.connect(self._schedule_preview)
+        self.material_control.currentChanged.connect(self._schedule_preview)
+        self.opacity_slider.valueChanged.connect(self._sync_labels)
+        self.feather_slider.valueChanged.connect(self._sync_labels)
+        self.opacity_slider.valueChanged.connect(self._schedule_preview)
+        self.feather_slider.valueChanged.connect(self._schedule_preview)
+        self.media_button.clicked.connect(self._choose_media)
+        self.clear_media_button.clicked.connect(self._clear_media)
+        self._select_swatch(self._color)
+        self._sync_labels()
+        self._sync_media()
+        self.name_edit.setFocus()
+        self.name_edit.selectAll()
+        _fit_to_contents(self)
+
+    @staticmethod
+    def _slider_row(label: str, slider: QSlider, value: QLabel) -> QWidget:
+        row = QWidget()
+        row.setMinimumHeight(42)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(12)
+        text = QLabel(label)
+        text.setObjectName("rowLabel")
+        text.setMinimumWidth(64)
+        layout.addWidget(text)
+        layout.addWidget(slider, 1)
+        layout.addWidget(value)
+        return row
+
+    def _sync_labels(self) -> None:
+        self.opacity_value.setText("{0}%".format(self.opacity_slider.value()))
+        self.feather_value.setText("{0} px".format(self.feather_slider.value()))
+
+    def _sync_media(self) -> None:
+        has_media = bool(self._media_path)
+        if has_media:
+            name = Path(self._media_path).name
+            metrics = self.media_label.fontMetrics()
+            self.media_label.setText(metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 220))
+            self.media_label.setToolTip(self._media_path)
+        else:
+            self.media_label.setText("未设置")
+            self.media_label.setToolTip("")
+        self.clear_media_button.setEnabled(has_media)
+        self.opacity_slider.setEnabled(has_media)
+        self.feather_slider.setEnabled(has_media)
+
+    def _select_swatch(self, color: str) -> None:
+        self._color = color
+        for swatch in self.swatches:
+            if swatch.color.lower() == color.lower():
+                swatch.setChecked(True)
+                return
+        self.custom_swatch.set_color(color)
+        self.custom_swatch.setChecked(True)
+
+    def _pick_color(self, color: str) -> None:
+        self._select_swatch(color)
+        self._schedule_preview()
+
+    def _choose_custom_color(self) -> None:
+        chosen = QColorDialog.getColor(QColor(self._color), self, "自定义色调")
+        if chosen.isValid():
+            self._select_swatch(chosen.name().upper())
+            self._schedule_preview()
+        else:
+            self._select_swatch(self._color)
+
+    def _choose_media(self) -> None:
+        from .media import MEDIA_FILTER, import_media_file
+
+        start = os.path.dirname(self._media_path) if self._media_path else str(Path.home())
+        path, _filter = QFileDialog.getOpenFileName(self, "选择背景图片或视频", start, MEDIA_FILTER)
+        if not path:
+            return
+        self._media_path = import_media_file(path)
+        self._sync_media()
+        self._schedule_preview()
+
+    def _clear_media(self) -> None:
+        self._media_path = ""
+        self._sync_media()
+        self._schedule_preview()
+
+    def _schedule_preview(self, *_args) -> None:
+        if self._preview is not None:
+            self._preview_timer.start()
+
+    def _emit_preview(self) -> None:
+        if self._preview is not None:
+            self._preview(self.values())
+
+    def _validate_and_accept(self) -> None:
+        if not self.name_edit.text().strip():
+            self.error_label.setText("名称不能为空。")
+            self.error_label.show()
+            self.name_edit.setFocus()
+            return
+        self._preview_timer.stop()
+        self.accept()
+
+    def values(self) -> dict[str, Any]:
+        return {
+            "title": self.name_edit.text().strip(),
+            "material": self.MATERIAL_VALUES[self.material_control.currentIndex()],
+            "color": self._color,
+            "media_path": self._media_path,
+            "media_opacity": self.opacity_slider.value() / 100.0,
+            "media_feather": self.feather_slider.value(),
+        }
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, preferences: Preferences, parent: QWidget | None = None) -> None:
+    """Grouped settings with a sidebar: 通用 / 外观 / 动态与性能 / 更新."""
+
+    check_updates_requested = Signal()
+    PAGES = ("通用", "外观", "动态与性能", "更新")
+
+    def __init__(self, preferences: Preferences, parent: QWidget | None = None, *,
+                 font_importer: Callable[[str], str] | None = None, update_status: str = "",
+                 initial_page: int = 0) -> None:
         super().__init__(parent)
         self.preferences = copy.deepcopy(preferences)
         self._opacity_was_float = isinstance(preferences.panel_opacity, float)
+        self._font_importer = font_importer
+        self._font_file = str(getattr(preferences, "font_file", "") or "")
+        self._font_file_family = theme.load_font_file(self._font_file) or "" if self._font_file else ""
+        self._backdrop_image = str(getattr(preferences, "backdrop_image", "") or "")
         self.setWindowTitle("桌屿设置")
-        _prepare_dialog(self, 620)
+        _prepare_dialog(self, 760, 560)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
-        root.setSpacing(14)
-        root.addLayout(_heading("桌屿设置", "调整桌面接管、自动整理与收纳岛显示方式。"))
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        desktop_group = QGroupBox("桌面")
-        desktop_layout = QVBoxLayout(desktop_group)
-        desktop_layout.setSpacing(10)
-        self.hide_native_check = QCheckBox("隐藏 Windows 原生桌面图标，由桌屿统一显示")
-        self.hide_native_check.setChecked(bool(preferences.hide_native_icons))
-        desktop_layout.addWidget(self.hide_native_check)
-        safety_note = QLabel("关闭桌屿或退出应用时，原生桌面图标会恢复显示。")
-        safety_note.setObjectName("helpText")
-        safety_note.setWordWrap(True)
-        desktop_layout.addWidget(safety_note)
-        root.addWidget(desktop_group)
+        nav_panel = QFrame()
+        nav_panel.setObjectName("navPanel")
+        nav_panel.setFixedWidth(186)
+        nav_layout = QVBoxLayout(nav_panel)
+        nav_layout.setContentsMargins(12, 20, 12, 16)
+        nav_layout.setSpacing(10)
+        nav_title = QLabel("设置")
+        nav_title.setObjectName("dialogTitle")
+        nav_layout.addWidget(nav_title)
+        self.nav = QListWidget()
+        self.nav.setObjectName("settingsNav")
+        self.nav.addItems(list(self.PAGES))
+        self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_layout.addWidget(self.nav, 1)
+        version = QLabel("{0}\n版本 {1}".format(APP_NAME, __version__))
+        version.setObjectName("helpText")
+        nav_layout.addWidget(version)
+        outer.addWidget(nav_panel)
 
-        layout_group = QGroupBox("布局与自动整理")
-        layout_form = QFormLayout(layout_group)
-        layout_form.setVerticalSpacing(11)
-        self.snap_check = QCheckBox("移动和缩放时吸附到网格")
-        self.snap_check.setChecked(bool(preferences.snap_to_grid))
-        layout_form.addRow("吸附", self.snap_check)
-        self.grid_spin = QSpinBox()
-        self.grid_spin.setRange(4, 64)
-        self.grid_spin.setSingleStep(2)
-        self.grid_spin.setSuffix(" px")
-        self.grid_spin.setValue(int(preferences.grid_size))
-        layout_form.addRow("网格尺寸", self.grid_spin)
-        self.auto_check = QCheckBox("持续监听并自动应用已启用的归流规则")
-        self.auto_check.setChecked(bool(preferences.auto_organize))
-        layout_form.addRow("自动归流", self.auto_check)
-        root.addWidget(layout_group)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 22, 24, 18)
+        content_layout.setSpacing(12)
+        self.stack = _FadeStack()
+        self.stack.addWidget(self._general_page(preferences))
+        self.stack.addWidget(self._appearance_page(preferences))
+        self.stack.addWidget(self._motion_page(preferences))
+        self.stack.addWidget(self._update_page(preferences, update_status))
+        content_layout.addWidget(self.stack, 1)
 
-        appearance_group = QGroupBox("外观与启动")
-        appearance_form = QFormLayout(appearance_group)
-        appearance_form.setVerticalSpacing(12)
-        opacity_row = QWidget()
-        opacity_layout = QHBoxLayout(opacity_row)
-        opacity_layout.setContentsMargins(0, 0, 0, 0)
-        opacity_layout.setSpacing(10)
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(35, 100)
-        initial_opacity = (
-            round(float(preferences.panel_opacity) * 100)
-            if self._opacity_was_float and float(preferences.panel_opacity) <= 1.0
-            else round(float(preferences.panel_opacity))
-        )
-        self.opacity_slider.setValue(max(35, min(100, initial_opacity)))
-        self.opacity_label = QLabel()
-        self.opacity_label.setMinimumWidth(44)
-        opacity_layout.addWidget(self.opacity_slider, 1)
-        opacity_layout.addWidget(self.opacity_label)
-        appearance_form.addRow("收纳岛透明度", opacity_row)
-        self.startup_check = QCheckBox("登录 Windows 后自动启动桌屿")
-        self.startup_check.setChecked(bool(preferences.start_with_windows))
-        appearance_form.addRow("开机启动", self.startup_check)
-        root.addWidget(appearance_group)
-
-        root.addStretch(1)
         button_row = QHBoxLayout()
         self.defaults_button = QPushButton("恢复默认")
         button_row.addWidget(self.defaults_button)
@@ -977,18 +1565,315 @@ class SettingsDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         _primary_button(buttons)
         button_row.addWidget(buttons)
-        root.addLayout(button_row)
+        content_layout.addLayout(button_row)
+        outer.addWidget(content, 1)
 
+        self.nav.currentRowChanged.connect(self.stack.set_page)
+        self.nav.setCurrentRow(max(0, min(len(self.PAGES) - 1, int(initial_page))))
         self.snap_check.toggled.connect(self.grid_spin.setEnabled)
+        self.auto_layout_check.toggled.connect(self.move_mode_control.setEnabled)
+        self.edge_switch_check.toggled.connect(self.edge_width_spin.setEnabled)
+        self.edge_switch_check.toggled.connect(self.edge_delay_spin.setEnabled)
         self.opacity_slider.valueChanged.connect(self._update_opacity_label)
+        self.font_combo.currentIndexChanged.connect(self._update_font_preview)
+        self.font_size_spin.valueChanged.connect(self._update_font_preview)
+        self.backdrop_control.currentChanged.connect(self._sync_backdrop)
         self.defaults_button.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
         self.grid_spin.setEnabled(self.snap_check.isChecked())
         self._update_opacity_label()
+        self._update_font_preview()
+        self._sync_backdrop()
 
+    # Pages ----------------------------------------------------------------
+    @staticmethod
+    def _page(title: str) -> tuple[QWidget, QVBoxLayout]:
+        """A scrollable settings page (content never gets squeezed)."""
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(8)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        layout.addSpacing(4)
+        scroll.setWidget(page)
+        return scroll, layout
+
+    def _general_page(self, preferences: Preferences) -> QWidget:
+        page, layout = self._page("通用")
+        self.hide_native_check = ToggleSwitch("隐藏 Windows 原生桌面图标，由桌屿统一显示")
+        self.hide_native_check.setChecked(bool(preferences.hide_native_icons))
+        self.startup_check = ToggleSwitch("登录 Windows 后自动启动桌屿")
+        self.startup_check.setChecked(bool(preferences.start_with_windows))
+        layout.addWidget(_section("桌面"))
+        layout.addWidget(_group(_switch_row(self.hide_native_check), _switch_row(self.startup_check)))
+        layout.addWidget(_help("关闭桌屿或退出应用时，原生桌面图标会恢复显示。"))
+
+        self.snap_check = ToggleSwitch("移动和缩放时吸附到网格")
+        self.snap_check.setChecked(bool(preferences.snap_to_grid))
+        self.grid_spin = QSpinBox()
+        self.grid_spin.setRange(4, 64)
+        self.grid_spin.setSingleStep(2)
+        self.grid_spin.setSuffix(" px")
+        self.grid_spin.setValue(int(preferences.grid_size))
+        self.grid_spin.setFixedWidth(110)
+        self.auto_check = ToggleSwitch("持续监听并自动应用已启用的归流规则")
+        self.auto_check.setChecked(bool(preferences.auto_organize))
+        layout.addWidget(_section("布局与自动整理"))
+        layout.addWidget(_group(_switch_row(self.snap_check), _row("网格尺寸", self.grid_spin),
+                                _switch_row(self.auto_check)))
+
+        # Automatic arrangement mode
+        self.auto_layout_check = ToggleSwitch("自动排列：岛屿按 ¼ / ⅓ / ½ / 整行 铺成网格")
+        self.auto_layout_check.setChecked(bool(getattr(preferences, "auto_layout", False)))
+        self.move_mode_control = SegmentedControl(["交换位置", "依次后移"])
+        modes = [value for value, _label in GRID_MOVE_CHOICES]
+        current_mode = str(getattr(preferences, "grid_move_mode", "swap") or "swap")
+        self.move_mode_control.setCurrentIndex(
+            modes.index(current_mode) if current_mode in modes else 0, animate=False
+        )
+        self.move_mode_control.setEnabled(self.auto_layout_check.isChecked())
+        layout.addWidget(_section("自动排列"))
+        layout.addWidget(_group(_switch_row(self.auto_layout_check),
+                                _row("拖动时其他岛屿", self.move_mode_control)))
+        layout.addWidget(_help("开启后岛屿可自由拖动，按四分之一屏幕吸附，空隙会自动补齐；"
+                               "岛屿大小改用大小级别调整。"))
+
+        # Edge page switching
+        self.edge_switch_check = ToggleSwitch("鼠标停在屏幕左右边缘时切换场景页")
+        self.edge_switch_check.setChecked(bool(getattr(preferences, "edge_switch_enabled", True)))
+        self.edge_width_spin = QSpinBox()
+        self.edge_width_spin.setRange(8, 120)
+        self.edge_width_spin.setSingleStep(4)
+        self.edge_width_spin.setSuffix(" px")
+        self.edge_width_spin.setValue(int(getattr(preferences, "edge_switch_width", 28)))
+        self.edge_width_spin.setFixedWidth(110)
+        self.edge_delay_spin = QSpinBox()
+        self.edge_delay_spin.setRange(120, 1500)
+        self.edge_delay_spin.setSingleStep(60)
+        self.edge_delay_spin.setSuffix(" ms")
+        self.edge_delay_spin.setValue(int(getattr(preferences, "edge_switch_delay_ms", 420)))
+        self.edge_delay_spin.setFixedWidth(110)
+        self.edge_width_spin.setEnabled(self.edge_switch_check.isChecked())
+        self.edge_delay_spin.setEnabled(self.edge_switch_check.isChecked())
+        layout.addWidget(_section("场景页切换"))
+        layout.addWidget(_group(_switch_row(self.edge_switch_check),
+                                _row("触发边缘宽度", self.edge_width_spin),
+                                _row("停留时间", self.edge_delay_spin)))
+        layout.addWidget(_help("仅在存在多个场景页时生效；停留足够久才会切换，避免误触。"))
+
+        layout.addStretch(1)
+        return page
+
+    def _appearance_page(self, preferences: Preferences) -> QWidget:
+        page, layout = self._page("外观")
+        material = str(getattr(preferences, "island_material", "frosted") or "frosted")
+        values = [value for value, _label in MATERIAL_CHOICES]
+        self.material_control = SegmentedControl([label for _value, label in MATERIAL_CHOICES])
+        self.material_control.setCurrentIndex(values.index(material) if material in values else 1, animate=False)
+        material_box = QWidget()
+        material_layout = QVBoxLayout(material_box)
+        material_layout.setContentsMargins(0, 8, 0, 8)
+        material_layout.addWidget(self.material_control)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(35, 100)
+        initial_opacity = (
+            round(float(preferences.panel_opacity) * 100)
+            if self._opacity_was_float and float(preferences.panel_opacity) <= 1.0
+            else round(float(preferences.panel_opacity))
+        )
+        self.opacity_slider.setValue(max(35, min(100, initial_opacity)))
+        self.opacity_label = QLabel()
+        self.opacity_label.setObjectName("valueLabel")
+        self.opacity_label.setMinimumWidth(44)
+        opacity_row = IslandAppearanceDialog._slider_row("面板浓度", self.opacity_slider, self.opacity_label)
+        layout.addWidget(_section("收纳岛背景"))
+        layout.addWidget(_group(material_box, opacity_row))
+        layout.addWidget(_help("这是所有收纳岛的默认质感；单个收纳岛可在右键菜单“外观与名称…”中另行选择。"))
+
+        self.backdrop_control = SegmentedControl(["系统壁纸", "自定义图片"])
+        self.backdrop_control.setCurrentIndex(
+            1 if getattr(preferences, "backdrop_source", "wallpaper") == "image" else 0, animate=False)
+        backdrop_box = QWidget()
+        backdrop_layout = QVBoxLayout(backdrop_box)
+        backdrop_layout.setContentsMargins(0, 8, 0, 8)
+        backdrop_layout.addWidget(self.backdrop_control)
+        image_row = QWidget()
+        image_layout = QHBoxLayout(image_row)
+        image_layout.setContentsMargins(0, 6, 0, 6)
+        image_layout.setSpacing(8)
+        self.backdrop_label = QLabel()
+        self.backdrop_label.setObjectName("valueLabel")
+        self.backdrop_button = QPushButton("选择图片…")
+        image_layout.addWidget(self.backdrop_label, 1)
+        image_layout.addWidget(self.backdrop_button)
+        self.backdrop_button.clicked.connect(self._choose_backdrop_image)
+        layout.addWidget(_section("玻璃取样来源"))
+        layout.addWidget(_group(backdrop_box, image_row))
+        layout.addWidget(_help("毛玻璃 / 液体玻璃会模糊身后的桌面壁纸。使用动态壁纸软件时，可选择一张相近的图片作为取样来源。"))
+
+        self.font_combo = QComboBox()
+        self.font_combo.setMaxVisibleItems(18)
+        self.font_combo.setMinimumWidth(230)
+        self.font_combo.addItem("系统默认", "")
+        current_family = str(getattr(preferences, "font_family", "") or "")
+        families = [name for name in QFontDatabase.families() if not name.startswith("@")]
+        if self._font_file_family and self._font_file_family not in families:
+            families.append(self._font_file_family)
+        for name in sorted(set(families), key=str.casefold):
+            self.font_combo.addItem(name, name)
+        index = self.font_combo.findData(current_family) if current_family else 0
+        self.font_combo.setCurrentIndex(max(0, index))
+        self.font_import_button = QPushButton("导入字体文件…")
+        self.font_import_button.clicked.connect(self._import_font)
+        font_row = QWidget()
+        font_layout = QHBoxLayout(font_row)
+        font_layout.setContentsMargins(0, 6, 0, 6)
+        font_layout.setSpacing(8)
+        font_label = QLabel("字体")
+        font_label.setObjectName("rowLabel")
+        font_layout.addWidget(font_label)
+        font_layout.addStretch(1)
+        font_layout.addWidget(self.font_combo)
+        font_layout.addWidget(self.font_import_button)
+        self.font_size_spin = QDoubleSpinBox()
+        self.font_size_spin.setRange(8.0, 16.0)
+        self.font_size_spin.setSingleStep(0.5)
+        self.font_size_spin.setDecimals(1)
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.setValue(float(getattr(preferences, "font_size", 10.0) or 10.0))
+        self.font_size_spin.setFixedWidth(110)
+        self.font_preview = QLabel("桌屿 DeskIsle · 把凌乱桌面整理成你的工作岛 0123")
+        self.font_preview.setObjectName("valueLabel")
+        self.font_preview.setWordWrap(True)
+        self.font_preview.setMinimumHeight(34)
+        layout.addWidget(_section("字体（应用于整个桌屿）"))
+        layout.addWidget(_group(font_row, _row("字号", self.font_size_spin), self.font_preview))
+        layout.addStretch(1)
+        return page
+
+    def _motion_page(self, preferences: Preferences) -> QWidget:
+        page, layout = self._page("动态与性能")
+        self.reduce_motion_check = ToggleSwitch("减弱动态效果")
+        self.reduce_motion_check.setChecked(bool(getattr(preferences, "reduce_motion", False)))
+        layout.addWidget(_group(_switch_row(self.reduce_motion_check)))
+        layout.addWidget(_help("开启后，展开 / 收拢、图标缩放与菜单将直接切换，不播放过渡动画。"))
+
+        self.smart_pause_check = ToggleSwitch("被遮挡时暂停视频与动画")
+        self.smart_pause_check.setChecked(bool(getattr(preferences, "smart_pause", True)))
+        fps = int(getattr(preferences, "media_fps", 24) or 24)
+        self.fps_control = SegmentedControl(["{0} 帧".format(value) for value in FPS_CHOICES])
+        closest = min(range(len(FPS_CHOICES)), key=lambda i: abs(FPS_CHOICES[i] - fps))
+        self.fps_control.setCurrentIndex(closest, animate=False)
+        self.fps_control.setFixedWidth(260)
+        layout.addSpacing(6)
+        layout.addWidget(_section("背景视频与 HTML 动画"))
+        layout.addWidget(_group(_switch_row(self.smart_pause_check), _row("视频帧率上限", self.fps_control)))
+        layout.addWidget(_help("全屏或最大化窗口挡住收纳岛、收拢或清屏时，会自动暂停背景视频、HTML 动画与网页渲染。"
+                               "帧率越低越省电，24 帧已足够流畅。"))
+        layout.addStretch(1)
+        return page
+
+    def _update_page(self, preferences: Preferences, update_status: str) -> QWidget:
+        page, layout = self._page("更新")
+        self.auto_update_check = ToggleSwitch("自动检查更新")
+        self.auto_update_check.setChecked(bool(getattr(preferences, "auto_check_updates", True)))
+        self.check_now_button = QPushButton("立即检查更新")
+        self.check_now_button.setObjectName("primary")
+        self.check_now_button.clicked.connect(self.check_updates_requested)
+        self.update_status_label = QLabel(update_status or "尚未检查")
+        self.update_status_label.setObjectName("valueLabel")
+        layout.addWidget(_group(_row("当前版本", QLabel(__version__)), _switch_row(self.auto_update_check),
+                                _row("上次检查", self.update_status_label)))
+        layout.addWidget(_help("从 GitHub 上的 narabias/DeskIsle 检查正式发布版本，每天最多自动检查一次，"
+                               "发现新版本时只提醒、不会自动安装。"))
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.check_now_button)
+        button_row.addStretch(1)
+        layout.addSpacing(4)
+        layout.addLayout(button_row)
+        layout.addSpacing(8)
+        layout.addWidget(_section("你的配置会被保留"))
+        layout.addWidget(_group(_help(
+            "更新只替换程序文件。收纳岛布局、归流规则、背景媒体与设置保存在 %LOCALAPPDATA%\\DeskIsle，"
+            "安装程序不会改动它们；开始安装前还会自动保存一份布局快照，可在“恢复布局快照”中找回。"),
+            margins=(14, 12, 14, 12)))
+        layout.addStretch(1)
+        return page
+
+    def set_update_status(self, text: str) -> None:
+        self.update_status_label.setText(text)
+
+    # Behaviour ------------------------------------------------------------
     def _update_opacity_label(self) -> None:
         self.opacity_label.setText(f"{self.opacity_slider.value()}%")
+
+    def _selected_font_family(self) -> str:
+        return str(self.font_combo.currentData() or "")
+
+    def _update_font_preview(self, *_args) -> None:
+        family = self._selected_font_family()
+        font = QFont()
+        if family:
+            font.setFamilies([family] + theme.DEFAULT_FAMILIES)
+        else:
+            font.setFamilies(theme.DEFAULT_FAMILIES)
+        font.setPointSizeF(self.font_size_spin.value())
+        self.font_preview.setFont(font)
+
+    def _import_font(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(self, "导入字体文件", str(Path.home()),
+                                                    "字体文件 (*.ttf *.otf *.ttc *.otc)")
+        if not path:
+            return
+        stored = path
+        if self._font_importer is not None:
+            try:
+                stored = self._font_importer(path) or path
+            except OSError:
+                stored = path
+        family = theme.load_font_file(stored)
+        if not family:
+            QMessageBox.warning(self, "导入字体", "无法读取这个字体文件。请确认它是有效的 TTF / OTF 字体。")
+            return
+        self._font_file = stored
+        self._font_file_family = family
+        index = self.font_combo.findData(family)
+        if index < 0:
+            self.font_combo.addItem(family, family)
+            index = self.font_combo.count() - 1
+        self.font_combo.setCurrentIndex(index)
+
+    def _sync_backdrop(self, *_args) -> None:
+        custom = self.backdrop_control.currentIndex() == 1
+        self.backdrop_button.setEnabled(custom)
+        if self._backdrop_image:
+            name = Path(self._backdrop_image).name
+            self.backdrop_label.setText(self.backdrop_label.fontMetrics().elidedText(
+                name, Qt.TextElideMode.ElideMiddle, 260))
+            self.backdrop_label.setToolTip(self._backdrop_image)
+        else:
+            self.backdrop_label.setText("未选择图片" if custom else "使用当前 Windows 壁纸")
+        self.backdrop_label.setEnabled(custom or not self._backdrop_image)
+
+    def _choose_backdrop_image(self) -> None:
+        start = os.path.dirname(self._backdrop_image) if self._backdrop_image else str(Path.home())
+        path, _filter = QFileDialog.getOpenFileName(self, "选择玻璃取样图片", start,
+                                                    "图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)")
+        if path:
+            from .media import import_media_file
+
+            self._backdrop_image = import_media_file(path)
+            self._sync_backdrop()
 
     def _restore_defaults(self) -> None:
         defaults = Preferences()
@@ -999,6 +1884,22 @@ class SettingsDialog(QDialog):
         self.startup_check.setChecked(defaults.start_with_windows)
         opacity = float(defaults.panel_opacity)
         self.opacity_slider.setValue(round(opacity * 100 if opacity <= 1.0 else opacity))
+        values = [value for value, _label in MATERIAL_CHOICES]
+        self.material_control.setCurrentIndex(values.index(defaults.island_material))
+        self.backdrop_control.setCurrentIndex(0)
+        self.font_combo.setCurrentIndex(0)
+        self.font_size_spin.setValue(defaults.font_size)
+        self.reduce_motion_check.setChecked(defaults.reduce_motion)
+        self.smart_pause_check.setChecked(defaults.smart_pause)
+        self.fps_control.setCurrentIndex(FPS_CHOICES.index(defaults.media_fps))
+        self.auto_update_check.setChecked(defaults.auto_check_updates)
+        self.auto_layout_check.setChecked(defaults.auto_layout)
+        self.move_mode_control.setCurrentIndex(
+            [value for value, _label in GRID_MOVE_CHOICES].index(defaults.grid_move_mode), animate=False
+        )
+        self.edge_switch_check.setChecked(defaults.edge_switch_enabled)
+        self.edge_width_spin.setValue(defaults.edge_switch_width)
+        self.edge_delay_spin.setValue(defaults.edge_switch_delay_ms)
 
     def _save_and_accept(self) -> None:
         opacity: float | int
@@ -1006,6 +1907,9 @@ class SettingsDialog(QDialog):
             opacity = self.opacity_slider.value() / 100.0
         else:
             opacity = self.opacity_slider.value()
+        family = self._selected_font_family()
+        font_file = self._font_file if family and family == self._font_file_family else ""
+        backdrop_source = "image" if self.backdrop_control.currentIndex() == 1 and self._backdrop_image else "wallpaper"
         self.preferences = replace(
             self.preferences,
             hide_native_icons=self.hide_native_check.isChecked(),
@@ -1014,8 +1918,238 @@ class SettingsDialog(QDialog):
             auto_organize=self.auto_check.isChecked(),
             start_with_windows=self.startup_check.isChecked(),
             panel_opacity=opacity,
+            island_material=MATERIAL_CHOICES[self.material_control.currentIndex()][0],
+            backdrop_source=backdrop_source,
+            backdrop_image=self._backdrop_image,
+            font_family=family,
+            font_file=font_file,
+            font_size=float(self.font_size_spin.value()),
+            reduce_motion=self.reduce_motion_check.isChecked(),
+            smart_pause=self.smart_pause_check.isChecked(),
+            media_fps=FPS_CHOICES[self.fps_control.currentIndex()],
+            auto_check_updates=self.auto_update_check.isChecked(),
+            auto_layout=self.auto_layout_check.isChecked(),
+            grid_move_mode=GRID_MOVE_CHOICES[self.move_mode_control.currentIndex()][0],
+            edge_switch_enabled=self.edge_switch_check.isChecked(),
+            edge_switch_width=int(self.edge_width_spin.value()),
+            edge_switch_delay_ms=int(self.edge_delay_spin.value()),
         )
         self.accept()
+
+
+class UpdateDialog(QDialog):
+    """Check → show release notes → download (SHA-256 verified) → install."""
+
+    install_requested = Signal(str)
+
+    def __init__(self, manager, parent: QWidget | None = None, release=None, newer: bool | None = None) -> None:
+        super().__init__(parent)
+        from .updater import RELEASES_PAGE, can_self_install
+
+        self.manager = manager
+        self.release = release
+        self._installer_path = ""
+        self._releases_page = RELEASES_PAGE
+        self._self_install = can_self_install()
+        self.setWindowTitle("软件更新")
+        _prepare_dialog(self, 540)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 24, 26, 20)
+        root.setSpacing(12)
+        title = QLabel("软件更新")
+        title.setObjectName("dialogTitle")
+        root.addWidget(title)
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("font-size: 12pt; font-weight: 600;")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+        self.detail_label = _help("")
+        root.addWidget(self.detail_label)
+        self.notes = QTextBrowser()
+        self.notes.setOpenExternalLinks(True)
+        self.notes.setMinimumHeight(150)
+        self.notes.setMaximumHeight(260)
+        self.notes.hide()
+        root.addWidget(self.notes)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 1000)
+        self.progress.hide()
+        root.addWidget(self.progress)
+        self.progress_label = _help("")
+        self.progress_label.hide()
+        root.addWidget(self.progress_label)
+        self.keep_note = _help("更新只替换程序文件，你的布局、规则和设置会原样保留；安装前会自动保存一份布局快照。")
+        root.addWidget(self.keep_note)
+        root.addStretch(1)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.skip_button = QPushButton("跳过此版本")
+        self.browser_button = QPushButton("在浏览器中查看")
+        row.addWidget(self.skip_button)
+        row.addWidget(self.browser_button)
+        row.addStretch(1)
+        self.later_button = QPushButton("稍后")
+        self.retry_button = QPushButton("重试")
+        self.cancel_button = QPushButton("取消下载")
+        self.install_button = QPushButton("下载并安装")
+        self.install_button.setObjectName("primary")
+        self.close_button = QPushButton("完成")
+        for button in (self.later_button, self.retry_button, self.cancel_button, self.install_button,
+                       self.close_button):
+            row.addWidget(button)
+        root.addLayout(row)
+
+        self.skip_button.clicked.connect(self._skip)
+        self.browser_button.clicked.connect(self._open_page)
+        self.later_button.clicked.connect(self.reject)
+        self.close_button.clicked.connect(self.accept)
+        self.retry_button.clicked.connect(self.start_check)
+        self.cancel_button.clicked.connect(self.manager.cancel_download)
+        self.install_button.clicked.connect(self._install_clicked)
+
+        self._connections = [
+            (manager.check_finished, self._check_finished),
+            (manager.check_failed, self._check_failed),
+            (manager.download_progress, self._download_progress),
+            (manager.download_finished, self._download_finished),
+            (manager.download_failed, self._download_failed),
+        ]
+        for signal, slot in self._connections:
+            signal.connect(slot)
+
+        if release is not None:
+            from .updater import is_newer
+
+            self._show_release(release, is_newer(release.version, manager.current_version) if newer is None else newer)
+        else:
+            self.start_check()
+
+    def _buttons(self, *visible: QPushButton) -> None:
+        for button in (self.skip_button, self.browser_button, self.later_button, self.retry_button,
+                       self.cancel_button, self.install_button, self.close_button):
+            button.setVisible(button in visible)
+
+    def start_check(self) -> None:
+        self.status_label.setText("正在检查更新…")
+        self.detail_label.setText("正在连接 GitHub（{0}）".format("narabias/DeskIsle"))
+        self.notes.hide()
+        self.progress.show()
+        self.progress.setRange(0, 0)
+        self.progress_label.hide()
+        self._buttons(self.later_button)
+        self.later_button.setText("取消")
+        self.manager.check(manual=True)
+
+    def _check_finished(self, release, newer: bool, _manual: bool) -> None:
+        if self.manager.is_downloading:
+            return
+        self._show_release(release, newer)
+
+    def _show_release(self, release, newer: bool) -> None:
+        self.release = release
+        self.progress.hide()
+        self.progress.setRange(0, 1000)
+        self.later_button.setText("稍后")
+        if not newer:
+            self.status_label.setText("桌屿已是最新版本")
+            self.detail_label.setText("当前版本 {0}，GitHub 上的最新发布版本为 {1}。".format(
+                self.manager.current_version, release.version))
+            self.notes.hide()
+            self._buttons(self.browser_button, self.close_button)
+            return
+        self.status_label.setText("发现新版本 {0}".format(release.version))
+        details = ["当前版本 {0}".format(self.manager.current_version)]
+        if release.published_text:
+            details.append("发布于 {0}".format(release.published_text))
+        if release.size_text:
+            details.append("安装包 {0}".format(release.size_text))
+        self.detail_label.setText(" · ".join(details))
+        notes = release.notes or "这个版本没有附带更新说明。"
+        self.notes.setMarkdown(notes)
+        self.notes.show()
+        if self._self_install and release.has_installer:
+            self.install_button.setText("下载并安装")
+        else:
+            self.install_button.setText("前往下载页面")
+        self._buttons(self.skip_button, self.browser_button, self.later_button, self.install_button)
+
+    def _check_failed(self, message: str, _manual: bool) -> None:
+        self.progress.hide()
+        self.progress.setRange(0, 1000)
+        self.status_label.setText("暂时无法检查更新")
+        self.detail_label.setText(message)
+        self.later_button.setText("关闭")
+        self._buttons(self.browser_button, self.retry_button, self.later_button)
+
+    def _install_clicked(self) -> None:
+        if self._installer_path:
+            self.install_requested.emit(self._installer_path)
+            return
+        release = self.release
+        if release is None:
+            return
+        if not (self._self_install and release.has_installer):
+            self._open_page()
+            return
+        self.status_label.setText("正在下载 {0}…".format(release.version))
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.show()
+        self.progress_label.setText("准备下载…")
+        self.progress_label.show()
+        self._buttons(self.cancel_button)
+        self.manager.download(release)
+
+    def _download_progress(self, received, total) -> None:
+        received = int(received)
+        total = int(total or 0)
+        if total > 0:
+            self.progress.setRange(0, 1000)
+            self.progress.setValue(int(1000 * min(1.0, received / total)))
+            self.progress_label.setText("{0:.1f} / {1:.1f} MB".format(received / 1048576, total / 1048576))
+        else:
+            self.progress.setRange(0, 0)
+            self.progress_label.setText("{0:.1f} MB".format(received / 1048576))
+
+    def _download_finished(self, path: str) -> None:
+        self._installer_path = path
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(1000)
+        self.status_label.setText("安装包已下载并通过校验")
+        self.progress_label.setText("SHA-256 校验通过。点击“立即安装”后，桌屿会保存布局、退出，安装完成后自动重新打开。")
+        self.install_button.setText("立即安装")
+        self._buttons(self.later_button, self.install_button)
+
+    def _download_failed(self, message: str) -> None:
+        self.progress.hide()
+        self.status_label.setText("下载未完成")
+        self.progress_label.setText(message)
+        self.progress_label.show()
+        self.install_button.setText("重新下载")
+        self._buttons(self.browser_button, self.later_button, self.install_button)
+
+    def _skip(self) -> None:
+        if self.release is not None:
+            self.manager.skip_version(self.release.version)
+        self.reject()
+
+    def _open_page(self) -> None:
+        url = getattr(self.release, "page_url", "") or self._releases_page
+        QDesktopServices.openUrl(QUrl(url))
+
+    def done(self, result: int) -> None:  # noqa: D401 - Qt API
+        if self.manager.is_downloading:
+            self.manager.cancel_download()
+        for signal, slot in self._connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._connections = []
+        super().done(result)
 
 
 class SnapshotDialog(QDialog):
@@ -1296,6 +2430,7 @@ class WelcomeDialog(QDialog):
 
 __all__ = [
     "AboutDialog",
+    "IslandAppearanceDialog",
     "NewIslandDialog",
     "RenameDialog",
     "RuleEditDialog",
@@ -1303,5 +2438,6 @@ __all__ = [
     "SettingsDialog",
     "SnapshotDialog",
     "TabDialog",
+    "UpdateDialog",
     "WelcomeDialog",
 ]

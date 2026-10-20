@@ -13,7 +13,12 @@ root = Path(SPECPATH).parent
 assets = [(str(root / 'deskisle/assets'), 'deskisle/assets'),
           (str(root / 'docs'), 'docs')]
 app = Analysis([str(root / 'main.py')], pathex=[str(root)], binaries=[], datas=assets,
-               hiddenimports=['PySide6.QtSvg', 'PySide6.QtTest'],
+               # Multimedia: video island backgrounds. WebEngine: HTML-animation and
+               # pinned-web-page islands (imported lazily, so list them explicitly).
+               hiddenimports=['PySide6.QtSvg', 'PySide6.QtTest', 'PySide6.QtNetwork',
+                              'PySide6.QtMultimedia', 'PySide6.QtWebEngineCore',
+                              'PySide6.QtWebEngineWidgets', 'PySide6.QtWebChannel',
+                              'PySide6.QtQuick', 'PySide6.QtQuickWidgets', 'PySide6.QtOpenGL'],
                excludes=['tkinter', 'matplotlib', 'numpy', 'pandas', 'scipy'],
                hookspath=[], runtime_hooks=[], noarchive=False)
 helper = Analysis([str(root / 'tools/shell_menu_entry.py')], pathex=[str(root)],

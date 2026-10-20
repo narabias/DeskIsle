@@ -4,15 +4,25 @@ import copy
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QPoint, QRect, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPixmap
+from PySide6.QtCore import (
+    QEvent,
+    QFileSystemWatcher,
+    QPoint,
+    QRect,
+    QRectF,
+    QSize,
+    QTimer,
+    QUrl,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeyEvent, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QFrame,
     QFileDialog,
@@ -22,24 +32,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .dialogs import NewIslandDialog, RulesDialog, SettingsDialog, WelcomeDialog
-from .island import IslandWidget
+from . import __version__, html_view, media, motion, theme
+from . import grid_layout
+from .backdrop import GlassCache, GlassStyle, paint_demo_background, paint_glass_base, paint_glass_rim, provider
+from .dialogs import NewIslandDialog, RulesDialog, SettingsDialog, UpdateDialog, WelcomeDialog
+from .island import IslandWidget, default_material, set_default_material
 from .items import ItemListWidget, open_path
 from .models import AppState, IslandState, ItemRef, PageState, TabState
 from .native_win import (
     MOD_ALT,
     MOD_CONTROL,
     MOD_NOREPEAT,
+    SPI_SETDESKWALLPAPER,
     VK_H,
     VK_LEFT,
     VK_RIGHT,
     VK_SPACE,
+    WM_SETTINGCHANGE,
     DesktopHost,
+    is_window_covered,
     set_window_overlay,
     set_window_no_activate,
 )
 from .rules import RuleEngine
 from .theme import APP_NAME, ISLAND_COLORS
+from .updater import RELEASES_PAGE, STARTUP_DELAY_MS, UpdateManager, can_self_install, launch_installer
+from .widgets import GlassMenu
 
 
 HOTKEY_FOCUS = 0x5151
@@ -48,6 +66,13 @@ HOTKEY_PREV = 0x5153
 HOTKEY_NEXT = 0x5154
 WM_HOTKEY = 0x0312
 ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
+# Islands that only show web content (no file references).
+WEB_ISLAND_KINDS = ("html", "web")
+OCCLUSION_INTERVAL_MS = 1500
+
+
+def _is_file_island(island) -> bool:
+    return getattr(island, "kind", "files") not in WEB_ISLAND_KINDS
 
 
 def _tabler_icon(name: str) -> QIcon:
@@ -92,22 +117,20 @@ class BoardSurface(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         if self.demo_mode:
-            gradient = QLinearGradient(0, 0, self.width(), self.height())
-            gradient.setColorAt(0.0, QColor("#0E1724"))
-            gradient.setColorAt(0.48, QColor("#18243A"))
-            gradient.setColorAt(1.0, QColor("#123833"))
-            painter.fillRect(self.rect(), gradient)
-            painter.setPen(QColor(255, 255, 255, 10))
-            step = 42
-            for x in range(0, self.width(), step):
-                painter.drawLine(x, 0, x, self.height())
-            for y in range(0, self.height(), step):
-                painter.drawLine(0, y, self.width(), y)
+            # Same abstract wallpaper the glass material samples in demo mode.
+            paint_demo_background(painter, QRectF(self.rect()))
         if self.focus_mode:
             painter.fillRect(self.rect(), QColor(4, 8, 14, 128))
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.demo_mode:
+            provider().schedule_rebuild(120)
+
 
 class FloatingToolbar(QFrame):
+    """Glass capsule with page switching and quick actions."""
+
     move_started = Signal()
     move_requested = Signal(QPoint)
     move_finished = Signal()
@@ -115,17 +138,20 @@ class FloatingToolbar(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("floatingToolbar")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._glass_cache = GlassCache()
         self.setStyleSheet(
-            "QWidget#floatingToolbar { background: rgba(20,27,38,225); border: 1px solid rgba(130,150,175,80);"
-            " border-radius: 16px; }"
-            "QToolButton { background: transparent; border: 0; border-radius: 10px; color: #EAF0F8;"
+            "QWidget#floatingToolbar { background: transparent; border: 0; }"
+            "QToolButton { background: transparent; border: 0; border-radius: 12px; color: #EAF0F8;"
             " padding: 5px 9px; font-size: 10pt; }"
-            "QToolButton:hover { background: rgba(85,214,190,45); color: #7CE8D5; }"
-            "QPushButton { background: transparent; border: 0; color: #F4F7FB; font-weight: 600; padding: 5px 12px; }"
+            "QToolButton:hover { background: rgba(255,255,255,30); }"
+            "QToolButton:pressed { background: rgba(255,255,255,46); }"
+            "QPushButton { background: transparent; border: 0; border-radius: 12px; color: #F4F7FB;"
+            " font-weight: 600; padding: 5px 12px; }"
+            "QPushButton:hover { background: rgba(255,255,255,24); }"
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 5, 7, 5)
+        layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(2)
         self.drag_handle = ToolbarDragHandle(self)
         self.previous_button = self._tool("chevron-left", "上一个场景页")
@@ -151,6 +177,21 @@ class FloatingToolbar(QFrame):
         self.drag_handle.move_started.connect(self.move_started)
         self.drag_handle.move_requested.connect(self.move_requested)
         self.drag_handle.move_finished.connect(self.move_finished)
+        provider().changed.connect(self.update)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        style = GlassStyle(material=default_material(), tint=QColor("#18202C"), density=0.9,
+                           radius=rect.height() / 2)
+        paint_glass_base(painter, rect, style, provider().canvas_point(self), self._glass_cache)
+        paint_glass_rim(painter, rect, style)
+        painter.end()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        if default_material() != "clear":
+            self.update()
 
     def _tool(self, icon_name: str, tooltip: str) -> QToolButton:
         button = QToolButton()
@@ -219,6 +260,10 @@ class DesktopWindow(QMainWindow):
         self._closing_for_real = False
         self._desktop_dirs = [] if demo_mode else _desktop_directories()
         self._rule_engine = RuleEngine(self.state.rules)
+        self.updater: UpdateManager | None = None
+        self._update_dialog: UpdateDialog | None = None
+        self._pending_release = None
+        self._grid_drag_order: list[str] | None = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self._make_icon())
@@ -250,6 +295,11 @@ class DesktopWindow(QMainWindow):
 
         self.surface = BoardSurface(demo_mode, self)
         self.setCentralWidget(self.surface)
+        # Uploaded island media / fonts are copied into the data folder so a
+        # moved or deleted original never breaks the layout.
+        media.set_import_handler(getattr(store, "import_media", None))
+        html_view.configure_storage(getattr(store, "root", None))
+        html_view.hub().download_finished.connect(self._web_download_finished)
 
         self.loose_view = ItemListWidget("__loose__", "__loose__", self.surface)
         self.loose_view.configure("__loose__", "__loose__", 56, False)
@@ -319,6 +369,11 @@ class DesktopWindow(QMainWindow):
         self.screen_restore_timer.setSingleShot(True)
         self.screen_restore_timer.setInterval(500)
         self.screen_restore_timer.timeout.connect(self._restore_after_screen_change)
+        # Pause background video / HTML / web rendering while an island is
+        # completely covered by other windows (fullscreen apps, games…).
+        self._occlusion_timer = QTimer(self)
+        self._occlusion_timer.setInterval(OCCLUSION_INTERVAL_MS)
+        self._occlusion_timer.timeout.connect(self._update_occlusion)
         if not demo_mode:
             for screen in QApplication.screens():
                 self._watch_screen(screen)
@@ -326,11 +381,160 @@ class DesktopWindow(QMainWindow):
             QApplication.instance().screenRemoved.connect(self._schedule_screen_restore)
         self._setup_tray()
         self._ensure_state()
+        self._setup_edge_switching()
+        self.apply_preferences(refresh=False)
         self.rebuild_page()
         self.import_new_desktop_items(initial=True)
         QTimer.singleShot(0, self._after_show)
         if not demo_mode:
             QTimer.singleShot(0, self.restore_positions)
+            self._setup_updater()
+
+    # Preferences ------------------------------------------------------------
+    def apply_preferences(self, refresh: bool = True) -> None:
+        """Push global appearance, motion and media preferences into every module."""
+        prefs = self.state.preferences
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                size = float(getattr(prefs, "font_size", 10.0) or 10.0)
+            except (TypeError, ValueError):
+                size = 10.0
+            theme.apply_app_font(app, str(getattr(prefs, "font_family", "") or ""), size,
+                                 str(getattr(prefs, "font_file", "") or ""))
+        motion.set_reduce_motion(bool(getattr(prefs, "reduce_motion", False)))
+        set_default_material(str(getattr(prefs, "island_material", "frosted") or "frosted"))
+        media.set_frame_rate(int(getattr(prefs, "media_fps", 24) or 24))
+        provider().configure(
+            str(getattr(prefs, "backdrop_source", "wallpaper") or "wallpaper"),
+            str(getattr(prefs, "backdrop_image", "") or ""),
+            demo_surface=self.surface if self.demo_mode else None,
+        )
+        self._sync_occlusion_timer()
+        if not refresh:
+            return
+        opacity = self._panel_opacity()
+        self.toolbar.adjustSize()
+        self.toolbar.update()
+        self._position_overlays()
+        for island in self.islands.values():
+            island.opacity = opacity
+            island._glass_cache.clear()
+            island.refresh_items()
+            island.update()
+        self._refresh_loose()
+
+    def _panel_opacity(self) -> float:
+        try:
+            value = float(self.state.preferences.panel_opacity)
+        except (TypeError, ValueError):
+            value = 0.88
+        if value > 1.0:
+            value /= 100.0
+        return max(0.35, min(1.0, value))
+
+    # Occlusion-aware pausing ---------------------------------------------------
+    def _sync_occlusion_timer(self) -> None:
+        enabled = not self.demo_mode and bool(getattr(self.state.preferences, "smart_pause", True))
+        if enabled:
+            if not self._occlusion_timer.isActive():
+                self._occlusion_timer.start()
+            return
+        self._occlusion_timer.stop()
+        for island in self.islands.values():
+            island.set_suspended("covered", False)
+
+    def _update_occlusion(self) -> None:
+        for island in list(self.islands.values()):
+            try:
+                animated = island.web is not None or island.media.is_animated()
+                if not animated:
+                    continue
+                covered = bool(island.isVisible() and island.desktop_window
+                               and is_window_covered(int(island.winId())))
+                island.set_suspended("covered", covered)
+            except RuntimeError:
+                continue
+
+    # Updates ------------------------------------------------------------------
+    def _ensure_updater(self) -> UpdateManager:
+        if self.updater is None:
+            self.updater = UpdateManager(getattr(self.store, "root", None), self, __version__)
+            self.updater.check_finished.connect(self._update_check_finished)
+        return self.updater
+
+    def _setup_updater(self) -> None:
+        self._ensure_updater()
+        self.tray.messageClicked.connect(self._tray_message_clicked)
+        QTimer.singleShot(STARTUP_DELAY_MS, self._auto_check_updates)
+        # Long-running sessions: look again a few times a day (the manager
+        # itself limits real requests to one per ~20 hours).
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(3 * 60 * 60 * 1000)
+        self._update_timer.timeout.connect(self._auto_check_updates)
+        self._update_timer.start()
+
+    def _auto_check_updates(self) -> None:
+        if self.updater is None or not bool(getattr(self.state.preferences, "auto_check_updates", True)):
+            return
+        self.updater.maybe_auto_check()
+
+    def _update_check_finished(self, release, newer: bool, manual: bool) -> None:
+        if manual or not newer or self.updater is None or self._update_dialog is not None:
+            return
+        if not self.updater.should_notify(release):
+            return
+        self.updater.mark_notified(release)
+        self._pending_release = release
+        self.tray.showMessage(
+            APP_NAME,
+            "桌屿 {0} 已发布，点击这里查看更新内容。".format(release.version),
+            QSystemTrayIcon.MessageIcon.Information,
+            8000,
+        )
+
+    def _tray_message_clicked(self) -> None:
+        release, self._pending_release = self._pending_release, None
+        if release is not None:
+            self.show_update_dialog(release)
+
+    def show_update_dialog(self, release=None, parent=None) -> None:
+        if self._update_dialog is not None:
+            self._update_dialog.raise_()
+            return
+        manager = self._ensure_updater()
+        dialog = UpdateDialog(manager, parent, release=release)
+        dialog.install_requested.connect(self._install_update)
+        self._update_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._update_dialog = None
+            dialog.deleteLater()
+
+    def _install_update(self, installer_path: str) -> None:
+        if not can_self_install():
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+            return
+        # Layout, rules and preferences live in the data folder, which the
+        # installer never touches; keep an extra snapshot just in case.
+        self.save_timer.stop()
+        self.save_state()
+        try:
+            self.store.save_snapshot(self.state, "更新前自动备份-v{0}".format(__version__))
+        except (OSError, RuntimeError, ValueError):
+            pass
+        if not launch_installer(installer_path):
+            QMessageBox.warning(None, "软件更新", "无法启动安装程序。请稍后重试，或在发布页面手动下载安装。")
+            return
+        if self._update_dialog is not None:
+            self._update_dialog.accept()
+        QTimer.singleShot(0, self.exit_application)
+
+    def _web_download_finished(self, path: str) -> None:
+        if self.tray.isVisible():
+            self.tray.showMessage(APP_NAME, "网页下载完成：{0}".format(os.path.basename(path)),
+                                  QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def _ensure_state(self) -> None:
         if not self.state.pages:
@@ -354,6 +558,17 @@ class DesktopWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_overlays()
+        # A resized desktop changes the grid; debounce so a drag-resize does
+        # not re-flow on every intermediate size.
+        if self.is_auto_layout():
+            timer = getattr(self, "_grid_resize_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(120)
+                timer.timeout.connect(self.apply_grid_layout)
+                self._grid_resize_timer = timer
+            timer.start()
 
     def _position_overlays(self) -> None:
         if not hasattr(self, "loose_view"):
@@ -474,6 +689,9 @@ class DesktopWindow(QMainWindow):
                     elif hotkey_id == HOTKEY_NEXT:
                         self.switch_page(1)
                     return True, 0
+                if msg.message == WM_SETTINGCHANGE and int(msg.wParam or 0) == SPI_SETDESKWALLPAPER:
+                    # Wallpaper changed: re-sample the glass backdrop.
+                    provider().schedule_rebuild(400)
             except (ValueError, OSError):
                 pass
         return super().nativeEvent(event_type, message)
@@ -496,15 +714,199 @@ class DesktopWindow(QMainWindow):
             return True
         return super().eventFilter(watched, event)
 
-    def rebuild_page(self) -> None:
+    def _grid_interaction_started(self) -> None:
+        """Remember the board before a drag so the drop can be resolved."""
+
+        if not self.is_auto_layout():
+            return
+        page = self.current_page()
+        self._grid_drag_before = list(self._grid_placements(page))
+
+    def _grid_interaction_finished(self, widget: IslandWidget) -> None:
+        """Drop the dragged island onto the board and settle the page.
+
+        The island lands on the quarter-screen slot under the pointer.  What the
+        other islands do is chosen in settings: ``swap`` trades places with
+        whichever island it overlapped, ``reorder`` lets the board refill around
+        the new position.  Either way the page is compacted afterwards so a gap
+        never survives a drag.
+        """
+
+        if not self.is_auto_layout():
+            return
+        page = self.current_page()
+        before = getattr(self, "_grid_drag_before", None)
+        self._grid_drag_before = None
+        ids = [island.id for island in page.islands]
+        if not before or widget.state.id not in ids:
+            self.apply_grid_layout()
+            return
+        index = ids.index(widget.state.id)
+        area = self.grid_area()
+        metrics = grid_layout.cells_for(
+            max(1, area.width()), max(1, area.height()),
+            grid_layout.content_rows(before),
+        )
+        point = widget.board_position()
+        local = (point.x() - area.x(), point.y() - area.y())
+        origin = before[index]
+        wanted = grid_layout.Placement(
+            *grid_layout.slot_at(local, metrics, origin.cols, origin.rows),
+            origin.cols, origin.rows,
+        )
+
+        mode = str(getattr(self.state.preferences, "grid_move_mode", "swap"))
+        placements = list(before)
+        if mode == "swap":
+            # Find whoever already owns the cell the island was dropped on, and
+            # trade places with it.  Falls back to the nearest free slot when
+            # the drop landed in empty space.
+            victim = next(
+                (i for i, placement in enumerate(before)
+                 if i != index and grid_layout.collides([wanted], placement)),
+                None,
+            )
+            if victim is None:
+                placements[index] = grid_layout.best_drop(before, index, local, metrics)
+            else:
+                placements[index] = wanted
+                swapped = grid_layout.Placement(
+                    origin.col, origin.row,
+                    before[victim].cols, before[victim].rows,
+                )
+                if grid_layout.collides(
+                    [p for i, p in enumerate(placements) if i != victim], swapped
+                ):
+                    swapped = grid_layout.first_free(
+                        [p for i, p in enumerate(placements) if i != victim],
+                        before[victim].cols, before[victim].rows,
+                    )
+                placements[victim] = swapped
+        else:
+            placements[index] = grid_layout.best_drop(before, index, local, metrics)
+        settled = grid_layout.compact(placements, pinned={index})
+        self._sync_placements_to_state(page, settled)
+        self.apply_grid_layout()
+
+    def cycle_island_level(self, island_id: str) -> None:
+        """Advance one island to the next size level and re-flow the page."""
+
+        page = self.current_page()
+        for island in page.islands:
+            if island.id == island_id:
+                island.size_level = grid_layout.next_level(island.size_level)
+                island.grid_col = -1
+                island.grid_row = -1
+                break
+        else:
+            return
+        self.apply_grid_layout()
+
+    def set_island_level(self, island_id: str, level: str) -> None:
+        page = self.current_page()
+        for island in page.islands:
+            if island.id == island_id:
+                island.size_level = grid_layout.normalise_level(level)
+                island.grid_col = -1
+                island.grid_row = -1
+                break
+        else:
+            return
+        self.apply_grid_layout()
+
+    # Edge page switching ------------------------------------------------------
+    def _setup_edge_switching(self) -> None:
+        """Poll the cursor so hovering a screen edge flips the scene page."""
+
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(90)
+        self._edge_timer.timeout.connect(self._poll_edge_switch)
+        self._edge_dwell = 0
+        self._edge_side = 0
+        self._edge_cooldown = 0
+        self._update_edge_timer()
+
+    def _update_edge_timer(self) -> None:
+        timer = getattr(self, "_edge_timer", None)
+        if timer is None:
+            return
+        enabled = bool(getattr(self.state.preferences, "edge_switch_enabled", True))
+        wants = enabled and len(self.state.pages) > 1 and not self.demo_mode
+        if wants and not timer.isActive():
+            timer.start()
+        elif not wants and timer.isActive():
+            timer.stop()
+        if not wants:
+            self._edge_dwell = 0
+            self._edge_side = 0
+
+    def _poll_edge_switch(self) -> None:
+        """Trigger a page flip after the cursor dwells on a screen edge."""
+
+        from PySide6.QtGui import QCursor
+
+        if self.demo_mode or len(self.state.pages) <= 1:
+            return
+        prefs = self.state.preferences
+        width = max(8, int(getattr(prefs, "edge_switch_width", 28)))
+        delay = max(120, int(getattr(prefs, "edge_switch_delay_ms", 420)))
+        step = 90
+
+        if self._edge_cooldown > 0:
+            self._edge_cooldown = max(0, self._edge_cooldown - step)
+            return
+
+        pos = QCursor.pos()
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        side = 0
+        if pos.x() <= area.left() + width:
+            side = -1
+        elif pos.x() >= area.right() - width:
+            side = 1
+        # Only the outer edge band counts; a cursor resting mid-screen is idle.
+        if side == 0:
+            self._edge_dwell = 0
+            self._edge_side = 0
+            return
+        if side != self._edge_side:
+            self._edge_side = side
+            self._edge_dwell = 0
+            return
+        self._edge_dwell += step
+        if self._edge_dwell >= delay:
+            self._edge_dwell = 0
+            # Avoid flip-flopping while the pointer stays parked on the edge.
+            self._edge_cooldown = 700
+            self.switch_page(side)
+
+    def rebuild_page(self, reveal: bool = True) -> None:
         for widget in list(self.islands.values()):
+            if widget.web is not None:
+                widget.web.release()
+            widget.media.clear()
             widget.hide()
+            # Detach right away instead of waiting for deleteLater().  A stale
+            # island stays parented to the surface until the event loop frees it,
+            # so a snapshot taken in the meantime still saw the previous page.
+            widget.setParent(None)
             widget.deleteLater()
         self.islands.clear()
         page = self.current_page()
         self.toolbar.page_button.setText(page.title)
-        for island_state in page.islands:
-            widget = IslandWidget(island_state, self.state.preferences.panel_opacity, self.surface,
+        auto = self.is_auto_layout()
+        if auto:
+            # Resolve once, then hand each widget its slot; the placements are
+            # also written back to the states so the board survives a restart.
+            placements = self._grid_placements(page)
+            self._sync_placements_to_state(page, placements)
+            rects = self._placements_to_rects(placements)
+        else:
+            rects = []
+        for index, island_state in enumerate(page.islands):
+            widget = IslandWidget(island_state, self._panel_opacity(), self.surface,
                                   desktop_window=not self.demo_mode)
             widget.set_snap_callback(self.snap_position)
             widget.state_changed.connect(self.queue_save)
@@ -513,28 +915,76 @@ class DesktopWindow(QMainWindow):
             widget.references_removed.connect(self._remove_references)
             widget.item_list.unavailable_remove_requested.connect(self._remove_unavailable_references)
             widget.item_list.shell_operation_finished.connect(self.import_new_desktop_items)
+            widget.window_level_changed.connect(lambda w=widget: self._apply_window_level(w))
+            widget.level_requested.connect(self.set_island_level)
+            widget.level_cycle_requested.connect(self.cycle_island_level)
+            widget.geometry_interaction_started.connect(self._grid_interaction_started)
+            widget.geometry_interaction_finished.connect(
+                lambda w=widget: self._grid_interaction_finished(w)
+            )
             self.islands[island_state.id] = widget
-            widget.show()
             if widget.desktop_window:
-                set_window_no_activate(int(widget.winId()), True)
-                set_window_overlay(int(widget.winId()), self.focus_mode)
+                self._set_level_flags(widget)
+            if auto and index < len(rects):
+                rect = rects[index]
+                widget.set_grid_size(rect.width(), rect.height())
+                widget.move_on_board(rect.topLeft())
             else:
-                widget.raise_()
+                widget.set_grid_unlocked()
+            # Showing a native island window paints it immediately, at its final
+            # position.  During a page switch that painted the *destination* for
+            # one frame before the slide began, which is the stray "finished"
+            # frame seen just before the animation.  Build hidden and let the
+            # caller reveal after the overlay owns the screen.
+            if reveal:
+                widget.show()
+                if widget.desktop_window:
+                    self._apply_native_level(widget)
+                else:
+                    widget.raise_()
         self._refresh_loose()
         if self.focus_mode:
             self.loose_view.show()
-            for widget in self.islands.values():
-                widget.show()
         else:
             self.loose_view.setVisible(not self.groups_hidden)
+        if reveal:
             for widget in self.islands.values():
                 keep = bool(getattr(widget.state, "exclude_from_hide", False))
-                widget.setVisible((not self.groups_hidden) or keep)
+                widget.setVisible(self.focus_mode or (not self.groups_hidden) or keep)
         if self.search.text():
             self._filter_items(self.search.text())
         self.toolbar.raise_()
         if self.search.isVisible():
             self.search.raise_()
+
+    # Window level (“窗口置顶”) ------------------------------------------------------
+    @staticmethod
+    def _is_pinned(widget: IslandWidget) -> bool:
+        return bool(getattr(widget.state, "pin_on_top", False))
+
+    def _set_level_flags(self, widget: IslandWidget) -> None:
+        pinned = self._is_pinned(widget)
+        widget.setWindowFlag(Qt.WindowType.WindowStaysOnBottomHint, not pinned)
+        widget.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, pinned)
+
+    def _apply_native_level(self, widget: IslandWidget) -> None:
+        hwnd = int(widget.winId())
+        # Web / HTML islands need keyboard input (typing, logging in); file
+        # islands stay non-activating so the desktop never steals focus.
+        set_window_no_activate(hwnd, not widget.is_web_content)
+        set_window_overlay(hwnd, self.focus_mode or self._is_pinned(widget))
+
+    def _apply_window_level(self, widget: IslandWidget) -> None:
+        if not widget.desktop_window:
+            widget.raise_()
+            return
+        visible = widget.isVisible()
+        # Changing window flags re-creates the native style (and hides the
+        # window); restore visibility and our extended styles afterwards.
+        self._set_level_flags(widget)
+        if visible:
+            widget.show()
+        self._apply_native_level(widget)
 
     def _refresh_loose(self) -> None:
         records = [(item.path, getattr(item, "title", "")) for item in getattr(self.state, "loose_items", [])]
@@ -583,18 +1033,20 @@ class DesktopWindow(QMainWindow):
     def _clamp_point(self, widget: IslandWidget, point: QPoint) -> QPoint:
         return self._fit_rect(QRect(point, widget.size())).topLeft()
 
-    def add_island(self, portal: bool = False) -> None:
-        data = NewIslandDialog.get_data(None, force_portal=portal)
+    def add_island(self, portal: bool = False, kind: str | None = None) -> None:
+        data = NewIslandDialog.get_data(None, force_portal=portal, kind=kind)
         if not data:
             return
-        title = str(data.get("title") or data.get("name") or "新收纳岛").strip()
+        island_kind = str(data.get("island_kind") or "files")
+        defaults = {"html": "HTML 动画", "web": "固定网页"}
+        title = str(data.get("title") or data.get("name") or defaults.get(island_kind, "新收纳岛")).strip()
         folder = data.get("folder") or data.get("folder_path") or data.get("path")
         page = self.current_page()
         index = len(page.islands)
-        width, height = 340, 270
+        width, height = (420, 320) if island_kind in WEB_ISLAND_KINDS else (340, 270)
         x = 48 + (index % 4) * 365
         y = 90 + (index // 4) * 295
-        tab = TabState(title="全部", portal_path=str(folder) if folder else None)
+        tab = TabState(title="全部", portal_path=str(folder) if folder and island_kind == "files" else None)
         state = IslandState(
             title=title,
             x=min(x, max(20, self.surface.width() - width - 20)),
@@ -604,6 +1056,10 @@ class DesktopWindow(QMainWindow):
             color=ISLAND_COLORS[index % len(ISLAND_COLORS)],
             tabs=[tab],
             active_tab_id=tab.id,
+            kind=island_kind,
+            html_path=str(data.get("html_path") or ""),
+            html_allow_network=bool(data.get("html_allow_network")),
+            web_url=str(data.get("web_url") or ""),
         )
         page.islands.append(state)
         self.rebuild_page()
@@ -618,11 +1074,18 @@ class DesktopWindow(QMainWindow):
         for tab in target.tabs:
             if not getattr(tab, "portal_path", None):
                 virtual_items.extend(tab.items)
-        detail = "其中 {0} 个引用会回到桌面散放区；原文件不会删除。".format(len(virtual_items))
+        kind = getattr(target, "kind", "files")
+        if kind == "html":
+            message = "删除“{0}”？\nHTML 文件本身不会被删除。".format(target.title)
+        elif kind == "web":
+            message = "删除“{0}”？\n只移除桌面上的网页窗口；网站登录状态仍保留在桌屿的网页配置中。".format(target.title)
+        else:
+            detail = "其中 {0} 个引用会回到桌面散放区；原文件不会删除。".format(len(virtual_items))
+            message = "删除“{0}”？\n{1}\n文件视窗对应的真实文件夹也不会删除。".format(target.title, detail)
         answer = QMessageBox.question(
             None,
             "删除收纳岛",
-            "删除“{0}”？\n{1}\n文件视窗对应的真实文件夹也不会删除。".format(target.title, detail),
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -778,7 +1241,8 @@ class DesktopWindow(QMainWindow):
             target_id = None
             if self.state.preferences.auto_organize:
                 target_id = self._choose_target(path)
-            target_island = next((item for item in all_islands if item.id == target_id), None)
+            target_island = next((item for item in all_islands if item.id == target_id and _is_file_island(item)),
+                                 None)
             if target_island is not None:
                 tab = next((tab for tab in target_island.tabs if not getattr(tab, "portal_path", None)), None)
                 if tab is not None:
@@ -835,7 +1299,7 @@ class DesktopWindow(QMainWindow):
             target_tab = None
             for page in self.state.pages:
                 for island in page.islands:
-                    if island.id == target_id:
+                    if island.id == target_id and _is_file_island(island):
                         target_tab = next((tab for tab in island.tabs if not getattr(tab, "portal_path", None)), None)
                         break
                 if target_tab is not None:
@@ -881,7 +1345,7 @@ class DesktopWindow(QMainWindow):
             set_window_overlay(int(self.winId()), wanted)
             set_window_overlay(int(self.search.winId()), wanted)
             for widget in self.islands.values():
-                set_window_overlay(int(widget.winId()), wanted)
+                set_window_overlay(int(widget.winId()), wanted or self._is_pinned(widget))
         if wanted:
             for widget in self.islands.values():
                 widget.show()
@@ -920,8 +1384,66 @@ class DesktopWindow(QMainWindow):
         index = next((i for i, page in enumerate(self.state.pages) if page.id == self.state.current_page_id), 0)
         index = (index + delta) % len(self.state.pages)
         self.state.current_page_id = self.state.pages[index].id
+        # Plain hard cut.  A cross-fade or slide would have to be drawn on an
+        # overlay window, and every island is its own native desktop window, so
+        # the compositor cannot keep them in step: the result is stray frames and
+        # flicker rather than motion.  Switching instantly is honest and clean.
         self.rebuild_page()
+        self._update_edge_timer()
         self.queue_save()
+
+    def _snapshot_board(self, include_hidden: bool = False) -> QPixmap | None:
+        """Composite the board onto a transparent pixmap.
+
+        ``QWidget.render`` and ``QWidget.grab`` both flood the whole canvas with
+        an opaque background, which is exactly wrong for DeskIsle: the board
+        paints nothing behind the islands so the wallpaper shows through.  Doing
+        it that way turned every page switch into a black sheet covering the
+        screen.  Rendering each child itself onto a cleared pixmap keeps the gaps
+        transparent.
+
+        Only the *current* page's islands are drawn.  ``rebuild_page`` schedules
+        the old widgets for deletion, but they stay parented to the surface until
+        the event loop gets around to it; rendering every child therefore mixed
+        the previous page into the new page's snapshot.
+
+        With *include_hidden* the widgets are rendered even while hidden, which
+        lets a page be captured without it ever appearing on screen first.
+        """
+
+        if self.demo_mode or motion.reduce_motion():
+            return None
+        size = self.surface.size()
+        if size.isEmpty():
+            return None
+        ratio = max(1.0, float(self.surface.devicePixelRatioF()))
+        pixmap = QPixmap(size * ratio)
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        current = list(self.islands.values())
+        try:
+            for widget in current:
+                if not include_hidden and not widget.isVisible():
+                    continue
+                if widget.width() <= 0 or widget.height() <= 0:
+                    continue
+                # Islands are separate top-level windows on the desktop, so their
+                # geometry() is in *global* screen coordinates.  Drawing at that
+                # point shifted the whole page by the board's own screen origin,
+                # which made the content appear to jump right before sliding.
+                offset = widget.geometry().topLeft()
+                if getattr(widget, "desktop_window", False) and hasattr(widget, "board_position"):
+                    offset = widget.board_position()
+                widget.render(painter, offset)
+            # Islands only.  The floating toolbar and search box are live widgets
+            # that stay on screen throughout the animation, so baking them into
+            # both snapshots produced two or three overlapping toolbars during a
+            # page switch.
+        finally:
+            painter.end()
+        return pixmap if not pixmap.isNull() else None
 
     def add_page(self) -> None:
         name, ok = QInputDialog.getText(None, "新建场景页", "场景页名称", text="新场景")
@@ -930,6 +1452,7 @@ class DesktopWindow(QMainWindow):
             self.state.pages.append(page)
             self.state.current_page_id = page.id
             self.rebuild_page()
+            self._update_edge_timer()
             self.queue_save()
 
     def rename_page(self) -> None:
@@ -941,9 +1464,7 @@ class DesktopWindow(QMainWindow):
             self.queue_save()
 
     def _show_page_menu(self) -> None:
-        menu = QMenu()
-        menu.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        menu.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        menu = GlassMenu(passive=True)
         for page in self.state.pages:
             action = menu.addAction(page.title)
             action.setCheckable(True)
@@ -986,6 +1507,7 @@ class DesktopWindow(QMainWindow):
         self.state.pages.remove(page)
         self.state.current_page_id = self.state.pages[min(index, len(self.state.pages) - 1)].id
         self.rebuild_page()
+        self._update_edge_timer()
         self.queue_save()
 
     def _screen_areas(self):
@@ -1008,6 +1530,15 @@ class DesktopWindow(QMainWindow):
 
     def restore_positions(self):
         self._capture_geometries()
+        if self.is_auto_layout():
+            # The grid owns island geometry; only the toolbar needs loading.
+            rect = self._fit_rect(self.toolbar.geometry())
+            self.state.preferences.toolbar_x, self.state.preferences.toolbar_y = rect.x(), rect.y()
+            self._position_overlays()
+            self.rebuild_page()
+            self.apply_grid_layout()
+            self.queue_save()
+            return
         for page in self.state.pages:
             for island in page.islands:
                 rect = self._fit_rect(QRect(island.x, island.y, island.width, island.height))
@@ -1050,6 +1581,154 @@ class DesktopWindow(QMainWindow):
         self.rebuild_page()
         self.queue_save()
 
+    # Automatic arrangement mode ------------------------------------------------
+    def grid_area(self) -> QRect:
+        """Usable rectangle for islands, excluding the floating toolbar strip."""
+
+        rect = self.surface.rect().adjusted(0, 0, 0, 0)
+        top = self.toolbar.y() + self.toolbar.height() + 12
+        return rect.adjusted(8, max(8, top), -8, -8)
+
+    def is_auto_layout(self) -> bool:
+        return bool(getattr(self.state.preferences, "auto_layout", False))
+
+    def grid_metrics(self, page: PageState | None = None):
+        """Pixel metrics of the micro-cell board for *page*."""
+
+        page = page or self.current_page()
+        area = self.grid_area()
+        placements = self._grid_placements(page)
+        return grid_layout.cells_for(
+            max(1, area.width()), max(1, area.height()),
+            grid_layout.content_rows(placements),
+        )
+
+    def _grid_placements(self, page: PageState):
+        """Resolve every island on *page* to a board placement, in order."""
+
+        levels = [grid_layout.normalise_level(island.size_level) for island in page.islands]
+        pinned = [
+            None if island.grid_col < 0 or island.grid_row < 0
+            else (island.grid_col, island.grid_row)
+            for island in page.islands
+        ]
+        return grid_layout.resolve(levels, pinned)
+
+    def _placements_to_rects(self, placements) -> list[QRect]:
+        """Convert board placements into board-relative pixel rectangles."""
+
+        area = self.grid_area()
+        metrics = grid_layout.cells_for(
+            max(1, area.width()), max(1, area.height()),
+            grid_layout.content_rows(placements),
+        )
+        rects = []
+        for placement in placements:
+            rect = grid_layout.to_rect(placement, metrics)
+            rects.append(QRect(area.x() + rect.x, area.y() + rect.y, rect.width, rect.height))
+        return rects
+
+    def grid_rects(self, page: PageState | None = None) -> list[QRect]:
+        """Computed geometry for the current (or given) page."""
+
+        page = page or self.current_page()
+        return self._placements_to_rects(self._grid_placements(page))
+
+    def _sync_placements_to_state(self, page: PageState, placements) -> None:
+        for island, placement in zip(page.islands, placements):
+            island.grid_col = placement.col
+            island.grid_row = placement.row
+
+    def apply_grid_layout(self, animate: bool = True) -> None:
+        """Re-flow the page and glide every island to its slot.
+
+        All islands share one curve and one duration so the board moves as a
+        single gesture rather than a queue of separate slides.
+        """
+
+        if not self.is_auto_layout():
+            return
+        page = self.current_page()
+        placements = self._grid_placements(page)
+        rects = self._placements_to_rects(placements)
+        self._sync_placements_to_state(page, placements)
+        for island_state, rect in zip(page.islands, rects):
+            island_state.x, island_state.y = rect.x(), rect.y()
+            island_state.width, island_state.height = rect.width(), rect.height()
+            widget = self.islands.get(island_state.id)
+            if widget is None:
+                continue
+            target = (float(rect.x()), float(rect.y()), float(rect.width()), float(rect.height()))
+            start = widget.grid_geometry()
+            if animate and start != target:
+                self._run_geometry_tween(widget, start, target)
+            else:
+                widget.apply_grid_geometry(*target)
+        self.queue_save()
+
+    def _run_geometry_tween(self, widget: IslandWidget, start, target) -> None:
+        """Animate one island along the shared re-flow curve."""
+
+        tween = getattr(widget, "_grid_tween", None)
+        if tween is None:
+            tween = motion.GeometryTween(widget, widget.apply_grid_geometry, motion.RELAYOUT_MS)
+            widget._grid_tween = tween
+        tween.finish()
+        tween.to(start, target)
+
+    def _seed_size_levels(self) -> None:
+        """Give every island a level matching the width it already had.
+
+        Turning the mode on must not visibly shuffle the page, so each level is
+        derived from the island's current width.  This round-trips exactly: a ½
+        island keeps its width ratio, so re-deriving it always yields ½ again.
+        """
+
+        area = self.grid_area()
+        total = max(1, area.width())
+        for page in self.state.pages:
+            for island in page.islands:
+                island.grid_col = -1
+                island.grid_row = -1
+                if not island.size_level:
+                    island.size_level = grid_layout.DEFAULT_SIZE_LEVEL
+                    continue
+                ratio = island.width / total
+                if ratio <= 0.30:
+                    island.size_level = grid_layout.LEVEL_QUARTER
+                elif ratio <= 0.42:
+                    island.size_level = grid_layout.LEVEL_THIRD
+                elif ratio <= 0.75:
+                    island.size_level = grid_layout.LEVEL_HALF
+                else:
+                    island.size_level = grid_layout.LEVEL_FULL
+
+    def set_auto_layout(self, enabled: bool) -> None:
+        """Toggle the arrangement mode and rebuild the current layout."""
+
+        enabled = bool(enabled)
+        if bool(self.state.preferences.auto_layout) == enabled:
+            return
+        self.state.preferences.auto_layout = enabled
+        if enabled:
+            self._seed_size_levels()
+        self.apply_grid_layout()
+        self.rebuild_page()
+        if self.is_auto_layout():
+            self.apply_grid_layout()
+        self.queue_save()
+
+    def _compact_grid(self) -> None:
+        """Close every gap on the page, then animate the result."""
+
+        if not self.is_auto_layout():
+            return
+        page = self.current_page()
+        compacted = grid_layout.compact(self._grid_placements(page))
+        self._sync_placements_to_state(page, compacted)
+        self.apply_grid_layout()
+
+
     def _watch_screen(self, screen):
         screen.geometryChanged.connect(self._schedule_screen_restore)
         screen.availableGeometryChanged.connect(self._schedule_screen_restore)
@@ -1068,17 +1747,18 @@ class DesktopWindow(QMainWindow):
         for screen in QApplication.screens()[1:]:
             geometry = geometry.united(screen.geometry())
         self.setGeometry(geometry.adjusted(2, 2, -2, -2))
+        provider().schedule_rebuild()
         # Preserve saved board coordinates; live windows still have their old
         # global origin until rebuilt after the monitor layout changes.
         self.rebuild_page()
         self.restore_positions()
 
     def show_board_menu(self, global_point: QPoint) -> None:
-        menu = QMenu()
-        menu.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        menu.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        menu = GlassMenu(passive=True)
         add_action = menu.addAction("新建收纳岛…")
         portal_action = menu.addAction("新建文件视窗…")
+        html_action = menu.addAction("新建 HTML 动画…")
+        web_action = menu.addAction("新建固定网页…")
         menu.addSeparator()
         hide_action = menu.addAction("恢复显示" if self.groups_hidden else "清屏")
         focus_action = menu.addAction("退出聚焦层" if self.focus_mode else "打开聚焦层")
@@ -1090,45 +1770,66 @@ class DesktopWindow(QMainWindow):
         restore_action = menu.addAction("恢复布局快照…")
         export_action = menu.addAction("导出布局…")
         import_action = menu.addAction("导入布局…")
+        menu.addSeparator()
         settings_action = menu.addAction("设置…")
+        update_action = menu.addAction("检查更新…")
+        handlers = {
+            add_action: lambda: self.add_island(False),
+            portal_action: lambda: self.add_island(True),
+            html_action: lambda: self.add_island(kind="html"),
+            web_action: lambda: self.add_island(kind="web"),
+            hide_action: self.toggle_hidden,
+            focus_action: self.toggle_focus,
+            arrange_action: self.auto_arrange,
+            scan_action: self.import_new_desktop_items,
+            rules_action: self.show_rules,
+            snapshot_action: self.save_snapshot,
+            restore_action: self.restore_snapshot,
+            export_action: self.export_layout,
+            import_action: self.import_layout,
+            settings_action: self.show_settings,
+            update_action: self.show_update_dialog,
+        }
         chosen = menu.exec(global_point)
-        if chosen == add_action:
-            self.add_island(False)
-        elif chosen == portal_action:
-            self.add_island(True)
-        elif chosen == hide_action:
-            self.toggle_hidden()
-        elif chosen == focus_action:
-            self.toggle_focus()
-        elif chosen == arrange_action:
-            self.auto_arrange()
-        elif chosen == scan_action:
-            self.import_new_desktop_items()
-        elif chosen == rules_action:
-            self.show_rules()
-        elif chosen == snapshot_action:
-            self.save_snapshot()
-        elif chosen == restore_action:
-            self.restore_snapshot()
-        elif chosen == export_action:
-            self.export_layout()
-        elif chosen == import_action:
-            self.import_layout()
-        elif chosen == settings_action:
-            self.show_settings()
+        handler = handlers.get(chosen)
+        if handler is not None:
+            handler()
 
-    def show_settings(self) -> None:
-        dialog = SettingsDialog(copy.deepcopy(self.state.preferences), None)
+    def show_settings(self, initial_page: int = 0) -> None:
+        manager = self.updater
+        dialog = SettingsDialog(
+            copy.deepcopy(self.state.preferences),
+            None,
+            font_importer=getattr(self.store, "import_font", None),
+            update_status=manager.last_check_text() if manager is not None else "尚未检查",
+            initial_page=initial_page,
+        )
+
+        def check_now() -> None:
+            self.show_update_dialog(parent=dialog)
+            if self.updater is not None:
+                dialog.set_update_status(self.updater.last_check_text())
+
+        dialog.check_updates_requested.connect(check_now)
         if dialog.exec():
+            was_auto = self.is_auto_layout()
             self.state.preferences = dialog.preferences
-            for island in self.islands.values():
-                island.opacity = self.state.preferences.panel_opacity
-                island.update()
+            self.apply_preferences()
+            self._update_edge_timer()
+            if self.is_auto_layout() != was_auto:
+                # Re-flow (or release) every island when the mode changes.
+                if self.is_auto_layout():
+                    self._seed_size_levels()
+                self.rebuild_page()
+                self.apply_grid_layout()
+            elif self.is_auto_layout():
+                self.apply_grid_layout()
             if not self.demo_mode:
                 self.native_host.show_native_icons(not self.state.preferences.hide_native_icons)
                 if not self.native_host.set_startup(bool(self.state.preferences.start_with_windows)):
                     QMessageBox.warning(None, '开机启动', '无法更新开机启动设置，请检查当前用户的权限。')
             self.queue_save()
+        dialog.deleteLater()
 
     def export_layout(self) -> None:
         path, _filter = QFileDialog.getSaveFileName(None, '导出布局', 'DeskIsle-layout.json', '布局文件 (*.json)')
@@ -1161,7 +1862,7 @@ class DesktopWindow(QMainWindow):
             QMessageBox.warning(None, '导入失败', str(exc))
 
     def show_rules(self) -> None:
-        islands = [island for page in self.state.pages for island in page.islands]
+        islands = [island for page in self.state.pages for island in page.islands if _is_file_island(island)]
         dialog = RulesDialog(copy.deepcopy(self.state.rules), islands, None)
         if hasattr(dialog, "apply_requested"):
             def apply_dialog_rules() -> None:
@@ -1219,11 +1920,15 @@ class DesktopWindow(QMainWindow):
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(self._make_icon(), self)
         self.tray.setToolTip(APP_NAME)
-        menu = QMenu()
+        menu = GlassMenu()
+        self._tray_menu = menu
         show_action = menu.addAction("显示 / 隐藏收纳岛")
         focus_action = menu.addAction("聚焦层")
+        menu.addSeparator()
         add_action = menu.addAction("新建收纳岛")
         portal_action = menu.addAction("新建文件视窗")
+        html_action = menu.addAction("新建 HTML 动画")
+        web_action = menu.addAction("新建固定网页")
         menu.addSeparator()
         rules_action = menu.addAction("归流规则")
         settings_action = menu.addAction("设置")
@@ -1237,17 +1942,21 @@ class DesktopWindow(QMainWindow):
         home_action.triggered.connect(self.restore_positions)
         arrange_action.triggered.connect(self.auto_arrange)
         menu.addSeparator()
+        update_action = menu.addAction("检查更新…")
         exit_action = menu.addAction("退出")
         show_action.triggered.connect(lambda _checked=False: self.toggle_hidden())
         focus_action.triggered.connect(lambda _checked=False: self.toggle_focus())
         add_action.triggered.connect(lambda: self.add_island(False))
         portal_action.triggered.connect(lambda: self.add_island(True))
+        html_action.triggered.connect(lambda: self.add_island(kind="html"))
+        web_action.triggered.connect(lambda: self.add_island(kind="web"))
         rules_action.triggered.connect(self.show_rules)
-        settings_action.triggered.connect(self.show_settings)
+        settings_action.triggered.connect(lambda _checked=False: self.show_settings())
         save_action.triggered.connect(self.save_snapshot)
         restore_action.triggered.connect(self.restore_snapshot)
         export_action.triggered.connect(self.export_layout)
         import_action.triggered.connect(self.import_layout)
+        update_action.triggered.connect(lambda _checked=False: self.show_update_dialog())
         exit_action.triggered.connect(self.exit_application)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
@@ -1292,8 +2001,12 @@ class DesktopWindow(QMainWindow):
         QApplication.quit()
 
     def _cleanup_native(self) -> None:
+        self._occlusion_timer.stop()
+        if self.updater is not None:
+            self.updater.shutdown()
         for widget in self.islands.values():
             widget.hide()
         self.search.hide()
+        html_view.shutdown()
         if not self.demo_mode:
             self.native_host.cleanup(int(self.winId()))

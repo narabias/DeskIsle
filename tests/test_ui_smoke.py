@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import deskisle.board as board_module  # noqa: E402
+from deskisle.motion import COLLAPSE_MS  # noqa: E402
 from deskisle.board import DesktopWindow  # noqa: E402
 from deskisle.items import ItemListWidget  # noqa: E402
 from deskisle.models import AppState, IslandState, ItemRef, PageState, TabState  # noqa: E402
@@ -78,11 +79,11 @@ class UiSmokeTests(unittest.TestCase):
 
             normal_widget.toggle_collapsed()
             self.assertTrue(normal.collapsed)
-            QTest.qWait(240)
+            QTest.qWait(COLLAPSE_MS + 160)
             self.assertEqual(normal_widget.height(), 44)
             normal_widget.toggle_collapsed()
             self.assertFalse(normal.collapsed)
-            QTest.qWait(240)
+            QTest.qWait(COLLAPSE_MS + 160)
 
             window._move_references(
                 [str(file_path)], "__loose__", "__loose__", normal.id, normal_tab.id

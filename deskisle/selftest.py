@@ -30,11 +30,15 @@ def run(report_path: Path) -> int:
     from PySide6.QtTest import QTest
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication
+    from . import html_view
     from .board import DesktopWindow, _tabler_icon
     from .island import CONTENT_TOP
     from .models import AppState, IslandState, ItemRef, PageState, TabState
+    from .motion import COLLAPSE_MS
     from .storage import StateStore
     from .theme import app_stylesheet
+    if QApplication.instance() is None:
+        html_view.prepare_application()
     app = QApplication.instance() or QApplication([])
     app.setStyle('Fusion')
     font_path = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts/msyh.ttc'
@@ -70,19 +74,27 @@ def run(report_path: Path) -> int:
             assert widget.tabs_row.geometry().bottom() < CONTENT_TOP - 4
             widget.item_list.verticalScrollBar().setValue(100)
             scroll = widget.item_list.verticalScrollBar().value()
+            settle = COLLAPSE_MS + 160
             widget.toggle_collapsed()
-            QTest.qWait(50)
+            QTest.qWait(min(80, COLLAPSE_MS // 3))
             assert widget._collapse_animating
             assert 44 < widget._visual_height < island.height
             widget.toggle_collapsed()
-            QTest.qWait(210)
+            QTest.qWait(settle)
             assert widget.height() == 480 and not island.collapsed
             assert widget.item_list.verticalScrollBar().value() == scroll
             widget.toggle_collapsed()
-            QTest.qWait(210)
+            QTest.qWait(settle)
             assert widget.height() == 44 and island.height == 480
+            # The count badge keeps its pill shape in the collapsed bar.
+            assert round(widget.header.badge_rect().height()) == 20
             widget.toggle_collapsed()
-            QTest.qWait(210)
+            QTest.qWait(settle)
+            for material in ('clear', 'frosted', 'liquid'):
+                island.material = material
+                widget.apply_appearance()
+                app.processEvents()
+                assert not widget.grab().isNull()
             widget._begin_move()
             widget._move_by(QPoint(20, 30))
             widget._commit_geometry()
@@ -91,6 +103,14 @@ def run(report_path: Path) -> int:
             report_path.parent.mkdir(parents=True, exist_ok=True)
             window.grab().save(str(report_path.with_suffix('.png')))
             report['ui'] = 'passed'
+            # HTML / web islands and background videos need these Qt add-ons;
+            # make sure PyInstaller really bundled them into the EXE.
+            from . import media as media_module
+            report['webengine'] = 'available' if html_view.webengine_available() else 'missing'
+            report['multimedia'] = 'available' if media_module.multimedia_available() else 'missing'
+            if getattr(sys, 'frozen', False):
+                assert report['webengine'] == 'available', 'Qt WebEngine is missing from the bundle'
+                assert report['multimedia'] == 'available', 'Qt Multimedia is missing from the bundle'
             if os.name == 'nt':
                 if getattr(sys, 'frozen', False):
                     command = [str(Path(sys.executable).with_name('DeskIsleShellMenu.exe'))]

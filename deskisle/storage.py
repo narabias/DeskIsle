@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
@@ -30,6 +32,12 @@ class StateStore:
     STATE_FILENAME = "state.json"
     BACKUP_FILENAME = "state.json.bak"
     SNAPSHOT_DIRECTORY = "snapshots"
+    MEDIA_DIRECTORY = "media"
+    FONT_DIRECTORY = "fonts"
+    # Background media up to this size is copied next to the layout so it keeps
+    # working when the original file is moved; larger videos are referenced.
+    MAX_MEDIA_COPY_BYTES = 200 * 1024 * 1024
+    MAX_FONT_COPY_BYTES = 64 * 1024 * 1024
 
     def __init__(self, root: str | PathLike[str] | None = None) -> None:
         if root is None:
@@ -46,6 +54,8 @@ class StateStore:
         self.state_path = self.root / self.STATE_FILENAME
         self.backup_path = self.root / self.BACKUP_FILENAME
         self.snapshots_dir = self.root / self.SNAPSHOT_DIRECTORY
+        self.media_dir = self.root / self.MEDIA_DIRECTORY
+        self.fonts_dir = self.root / self.FONT_DIRECTORY
 
     def load(self) -> AppState:
         """Load state, recovering from the backup when necessary.
@@ -281,6 +291,100 @@ class StateStore:
     # concise spellings without sacrificing a descriptive implementation name.
     import_ = import_state
     import_file = import_state
+
+    # Managed copies of background media and fonts ---------------------------
+    def import_media(self, path: str | PathLike[str]) -> str:
+        """Copy a background image/video into ``media/`` and return the path.
+
+        The original file is never modified.  Files that cannot be read or are
+        larger than :attr:`MAX_MEDIA_COPY_BYTES` are referenced in place.
+        """
+
+        return self._import_managed(path, self.media_dir, self.MAX_MEDIA_COPY_BYTES, keep_name=False)
+
+    def import_font(self, path: str | PathLike[str]) -> str:
+        """Copy a user font into ``fonts/`` so it survives moving the original."""
+
+        return self._import_managed(path, self.fonts_dir, self.MAX_FONT_COPY_BYTES, keep_name=True)
+
+    def _import_managed(self, path: str | PathLike[str], folder: Path, limit: int, *, keep_name: bool) -> str:
+        source = Path(os.fspath(path)).expanduser()
+        try:
+            if not source.is_file():
+                return os.fspath(path)
+            resolved = source.resolve()
+            try:
+                if resolved.parent == folder.resolve():
+                    return str(resolved)
+            except OSError:
+                pass
+            size = source.stat().st_size
+            if size <= 0 or size > limit:
+                return str(source)
+            digest = hashlib.sha256()
+            with source.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            suffix = source.suffix.lower()[:12]
+            if keep_name:
+                stem = re.sub(r"[^\w.-]+", "-", source.stem, flags=re.UNICODE).strip(".-_")[:60] or "font"
+                name = "{0}-{1}{2}".format(stem, digest.hexdigest()[:8], suffix)
+            else:
+                name = digest.hexdigest()[:20] + suffix
+            target = folder / name
+            if not target.is_file() or target.stat().st_size != size:
+                folder.mkdir(parents=True, exist_ok=True)
+                temp = target.with_name("." + target.name + ".tmp")
+                shutil.copyfile(source, temp)
+                os.replace(temp, target)
+            return str(target)
+        except OSError:
+            return str(source)
+
+    def prune_media(self, state: AppState | None = None) -> int:
+        """Delete managed media files that no layout references any more.
+
+        References in the current state, the ``.bak`` file and every layout
+        snapshot are kept, so restoring an old snapshot never loses its
+        background.  Returns the number of removed files.
+        """
+
+        if not self.media_dir.is_dir():
+            return 0
+        keep: set[str] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, Mapping):
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    collect(item)
+            elif isinstance(value, str) and value:
+                keep.add(os.path.normcase(os.path.basename(value)))
+
+        if state is not None:
+            collect(state.to_dict())
+        sources = [self.state_path, self.backup_path]
+        if self.snapshots_dir.is_dir():
+            sources.extend(path for path in self.snapshots_dir.iterdir() if path.suffix.casefold() == ".json")
+        for source in sources:
+            try:
+                collect(self._read_mapping(source))
+            except (OSError, StateStoreError):
+                # When any layout cannot be read, keep every file to be safe.
+                if source.exists():
+                    return 0
+        removed = 0
+        for path in self.media_dir.iterdir():
+            if not path.is_file() or os.path.normcase(path.name) in keep:
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
 
     @staticmethod
     def _coerce_state(state: AppState | Mapping[str, Any] | Any) -> AppState:
