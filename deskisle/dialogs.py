@@ -1210,6 +1210,90 @@ class AboutDialog(QDialog):
         root.addWidget(buttons)
 
 
+class WelcomeDialog(QDialog):
+    """First-run guide. Only asks about startup; every choice is reversible."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"欢迎使用 {APP_NAME}")
+        _prepare_dialog(self, 420)
+        # A guide is not a task dialog: there is no close button, and both
+        # outcomes are positive choices rather than accept/reject.
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(30, 28, 30, 24)
+        root.setSpacing(14)
+
+        mark = QLabel("▦")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setStyleSheet(
+            f"color: {ACCENT}; font-size: 34pt; font-weight: 700; background: transparent;"
+        )
+        root.addWidget(mark)
+
+        title = QLabel(f"欢迎使用 {APP_NAME}")
+        title.setObjectName("dialogTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(title)
+
+        subtitle = QLabel("把凌乱桌面整理成你的工作岛。")
+        subtitle.setObjectName("dialogSubtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        card = QFrame()
+        card.setObjectName("summaryCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(8)
+
+        question = QLabel("开机自动启动")
+        question.setStyleSheet("font-weight: 600;")
+        card_layout.addWidget(question)
+
+        explanation = QLabel(
+            "桌屿平时停留在桌面底层，开机自动启动可以让收纳岛立即就位，"
+            "不必每次手动打开。"
+        )
+        explanation.setObjectName("helpText")
+        explanation.setWordWrap(True)
+        card_layout.addWidget(explanation)
+
+        self.startup_check = QCheckBox("登录 Windows 后自动启动桌屿（推荐）")
+        self.startup_check.setChecked(True)
+        card_layout.addWidget(self.startup_check)
+        root.addWidget(card)
+
+        note = QLabel("之后可随时在设置中开启或关闭，不影响其他功能。")
+        note.setObjectName("helpText")
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        root.addStretch(1)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+        self.skip_button = QPushButton("暂不设置")
+        self.accept_button = QPushButton("开始使用")
+        self.accept_button.setObjectName("primary")
+        self.skip_button.setDefault(False)
+        self.accept_button.setDefault(True)
+        button_row.addWidget(self.skip_button)
+        button_row.addWidget(self.accept_button)
+        root.addLayout(button_row)
+
+        self.skip_button.clicked.connect(self.reject)
+        self.accept_button.clicked.connect(self.accept)
+
+    def wants_startup(self) -> bool:
+        """Return the startup preference chosen in this guide."""
+        return bool(self.startup_check.isChecked())
+
+
 __all__ = [
     "AboutDialog",
     "NewIslandDialog",
@@ -1219,4 +1303,5 @@ __all__ = [
     "SettingsDialog",
     "SnapshotDialog",
     "TabDialog",
+    "WelcomeDialog",
 ]

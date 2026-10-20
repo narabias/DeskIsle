@@ -289,6 +289,7 @@ class Preferences:
     panel_opacity: float = 0.88
     toolbar_x: int = -1
     toolbar_y: int = 14
+    onboarding_done: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -300,6 +301,7 @@ class Preferences:
             "panel_opacity": self.panel_opacity,
             "toolbar_x": self.toolbar_x,
             "toolbar_y": self.toolbar_y,
+            "onboarding_done": self.onboarding_done,
         }
 
     @classmethod
@@ -317,6 +319,7 @@ class Preferences:
             panel_opacity=opacity,
             toolbar_x=_as_int(raw.get("toolbar_x"), -1),
             toolbar_y=_as_int(raw.get("toolbar_y"), 14),
+            onboarding_done=_as_bool(raw.get("onboarding_done"), False),
         )
 
 

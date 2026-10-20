@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .dialogs import NewIslandDialog, RulesDialog, SettingsDialog
+from .dialogs import NewIslandDialog, RulesDialog, SettingsDialog, WelcomeDialog
 from .island import IslandWidget
 from .items import ItemListWidget, open_path
 from .models import AppState, IslandState, ItemRef, PageState, TabState
@@ -417,6 +417,28 @@ class DesktopWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Warning,
                     3500,
                 )
+            self.maybe_show_welcome()
+
+    def maybe_show_welcome(self) -> None:
+        """Offer the first-run guide once, after the desktop surface is ready."""
+        if self.demo_mode or self.state.preferences.onboarding_done:
+            return
+        dialog = WelcomeDialog(None)
+        dialog.exec()
+        # Any answer (including closing) counts as seen so the guide never
+        # blocks startup a second time.
+        self.state.preferences.onboarding_done = True
+        wants_startup = dialog.wants_startup()
+        if wants_startup != bool(self.state.preferences.start_with_windows):
+            self.state.preferences.start_with_windows = wants_startup
+            if not self.native_host.set_startup(wants_startup):
+                self.tray.showMessage(
+                    APP_NAME,
+                    "无法更新开机启动设置，请稍后在设置中重试。",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000,
+                )
+        self.queue_save()
 
     def _ensure_desktop_host(self) -> None:
         if self.demo_mode or self.focus_mode:
