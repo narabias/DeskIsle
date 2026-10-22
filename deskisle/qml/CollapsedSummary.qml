@@ -75,7 +75,7 @@ Item {
             id: play
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            size: 28
+            size: 30
             iconSize: 16
             icon: Player.playing ? "player-pause" : "player-play"
             tip: Player.playing ? "暂停" : "播放"
@@ -85,7 +85,7 @@ Item {
             id: next
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            size: 28
+            size: 30
             iconSize: 15
             icon: "player-skip-forward"
             tip: "下一首"
@@ -97,7 +97,7 @@ Item {
             anchors.right: next.left
             anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
-            size: 28
+            size: 30
             iconSize: 15
             icon: "player-skip-back"
             tip: "上一首"

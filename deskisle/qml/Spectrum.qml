@@ -26,6 +26,16 @@ Item {
     }
     readonly property real contentWidth: bars * slot - barGap
     readonly property bool animate: playing && !App.paused && !Theme.reduceMotion
+    // True while the bars are still above the baseline: keeps the timer alive after a pause so
+    // they can fall all the way down.
+    readonly property bool settling: {
+        for (var i = 0; i < heights.length; ++i) {
+            if (heights[i] > minBarHeight + 0.6) {
+                return true
+            }
+        }
+        return false
+    }
     readonly property real maxBarHeight: Math.max(minBarHeight + 1, height)
 
     onBarsChanged: rebuild()
@@ -51,7 +61,7 @@ Item {
     Timer {
         interval: 45
         repeat: true
-        running: spectrum.animate && spectrum.visible
+        running: spectrum.visible && (spectrum.animate || spectrum.settling)
         onTriggered: spectrum.step()
     }
 
@@ -76,8 +86,9 @@ Item {
                 target = minBarHeight
             }
             var prev = heights.length > i ? heights[i] : minBarHeight
-            // Fast attack, soft release - the way a level meter moves.
-            out.push(prev + (target - prev) * (target > prev ? 0.55 : 0.28))
+            // Fast attack, soft release - the way a level meter moves.  Pausing lets the bars
+            // sink slowly to the baseline instead of freezing mid-air.
+            out.push(prev + (target - prev) * (target > prev ? 0.55 : (animate ? 0.28 : 0.16)))
         }
         heights = out
     }

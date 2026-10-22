@@ -28,15 +28,19 @@ Item {
     // wide enough.  Everything below is hidden on small islands instead of squeezing the controls.
     readonly property bool showLine: media.has && media.width >= 240 && media.height >= 168
                                      && (!media.stacked || media.height >= 300)
-    readonly property real lineHeight: media.showLine ? Math.max(16, Math.min(34, Math.round(media.height * 0.12))) : 0
+    readonly property real lineHeight: media.showLine ? Math.max(16, Math.min(46, Math.round(media.height * 0.12))) : 0
     readonly property real lineInset: media.showLine ? 10 : 0
     readonly property real lineBlock: media.showLine ? media.lineHeight + 8 : 0
     readonly property real infoHeight: 128   // rows of text + seek + transport, for the room check
+    // Lyrics scale with the widget: 11 px on a 440 px panel, up to 21 px on a full desk widget.
+    readonly property real lyricSize: Math.round(Math.max(11, Math.min(21, media.width / 46)))
+    readonly property real lyricSubSize: Math.max(10, media.lyricSize - 3)
+    readonly property real lyricBlock: Math.round(media.lyricSize * 1.35 + media.lyricSubSize * 1.35 + 2)
     readonly property bool lyricReady: media.lyricLines.length > 0 && media.lyricIndex >= 0
     readonly property bool lyricsRoom: media.showLine && !media.stacked && media.width >= 320
-                                       && media.height - media.lineBlock - 40 >= media.infoHeight + 10
+                                       && media.height - media.lineBlock - media.lyricBlock - 8 >= media.infoHeight + 10
     readonly property bool showLyrics: media.lyricsRoom   // reserve the space even before lyrics arrive: no resize when they load
-    readonly property real lyricsHeight: media.showLyrics ? 32 : 0
+    readonly property real lyricsHeight: media.showLyrics ? media.lyricBlock : 0
     readonly property real footerHeight: media.lineBlock + media.lyricsHeight + media.lineInset
     readonly property string songKey: Player.title + "\u0001" + Player.artist
     property var lyricLines: []
@@ -288,6 +292,19 @@ Item {
     }
 
     property string lyricFor: ""
+    // A player may ignore repeat / shuffle over GSMTC (网易云音乐 does): say so instead of
+    // leaving a button that seems dead.
+    property int repeatTry: -1
+    Timer {
+        id: repeatWatch
+        interval: 800
+        onTriggered: {
+            if (media.repeatTry >= 0 && Player.repeat !== media.repeatTry) {
+                Desk.postNotice("循环模式", "当前播放器没有通过系统媒体控制提供循环切换。", "info")
+            }
+            media.repeatTry = -1
+        }
+    }
     onSongKeyChanged: lyricTimer.restart()
     Timer {
         id: lyricTimer
@@ -323,9 +340,18 @@ Item {
         triggeredOnStart: true
         onTriggered: media.sync()
     }
+    // Re-read the position whenever the player reports a change; resuming after a pause
+    // re-anchors the lyric line so it cannot stay offset.
+    property bool wasPlaying: false
     Connections {
         target: Player
-        function onChanged() { media.sync() }
+        function onChanged() {
+            media.sync()
+            if (Player.playing && !media.wasPlaying) {
+                media.syncLyric()
+            }
+            media.wasPlaying = Player.playing
+        }
     }
     Component.onCompleted: {
         sync()
@@ -713,7 +739,11 @@ Item {
                 size: 30
                 iconSize: 15
                 checked: Player.repeat !== 0
-                onClicked: Player.setRepeat((Player.repeat + 1) % 3)
+                onClicked: {
+                    media.repeatTry = (Player.repeat + 1) % 3
+                    Player.setRepeat(media.repeatTry)
+                    repeatWatch.restart()
+                }
                 Text {
                     visible: Player.repeat === 1
                     anchors.right: parent.right
@@ -756,7 +786,7 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
                 font.family: Theme.fontFamily
-                font.pixelSize: 11
+                font.pixelSize: media.lyricSize
                 font.weight: Font.DemiBold
             }
             Text {
@@ -768,7 +798,7 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
                 font.family: Theme.fontFamily
-                font.pixelSize: 10
+                font.pixelSize: media.lyricSubSize
             }
         }
         Spectrum {
@@ -780,6 +810,8 @@ Item {
             anchors.leftMargin: 16
             anchors.rightMargin: 16
             height: media.lineHeight
+            barWidth: Math.max(2, Math.round(media.lineHeight / 7))
+            barGap: Math.max(2, Math.round(media.lineHeight / 7))
             playing: Player.playing
             color: Theme.dark ? Qt.lighter(media.tint, 1.25) : media.tint
         }
