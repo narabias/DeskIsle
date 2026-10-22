@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import logging
 import os
 import sys
 import time
@@ -44,9 +45,34 @@ from .arrange import Arranger, footprint, min_size
 from .desk_items import LOOSE, ItemsMixin, desktop_directories
 from .scene import IslandProxy, MonitorScene, ObjectListModel
 
+log = logging.getLogger(__name__)
+
 WIDGET_SIZES = {"clock": (320, 190), "weather": (340, 230), "media": (360, 176), "todo": (300, 340)}
 WIDGET_TITLES = {"clock": "时钟", "weather": "天气", "media": "正在播放", "todo": "待办"}
 ICON_SIZES = (32, 40, 48, 56, 64, 72, 96)
+
+
+def _action_args(args) -> dict:
+    """Normalise the ``args`` object QML passes to an island action into a dict.
+
+    QML calls like ``Desk.act(uid, "collapse", { value: !island.collapsed })`` reach a
+    ``"QVariant"`` slot, and some PySide versions hand a JavaScript object over as a
+    ``QJSValue`` rather than as a ``dict``.  Treating that object as the value itself
+    made every call truthy: the expand button asked for "collapse" forever, so a
+    collapsed island could never be opened again.
+    """
+    if args is None:
+        return {}
+    if isinstance(args, dict):
+        return dict(args)
+    to_variant = getattr(args, "toVariant", None)
+    if callable(to_variant):
+        try:
+            converted = to_variant()
+        except Exception:  # noqa: BLE001 - a broken JS value is an empty argument list
+            return {}
+        return _action_args(converted)
+    return {"value": args}
 
 
 def lrect(qrect) -> Rect:
@@ -847,13 +873,14 @@ class DeskController(ItemsMixin, QObject):
         self.island_action(uid, name, args if args is not None else {})
 
     def island_action(self, uid: str, name: str, args=None):  # noqa: C901 - dispatcher
-        args = dict(args or {}) if isinstance(args, dict) else {"value": args}
+        args = _action_args(args)
         proxy = self.proxy(uid)
         _page, s = self.find_island(uid)
         if s is None:
             return None
         value = args.get("value")
         if name == "collapse":
+            log.debug("collapse %s value=%r collapsed=%s", uid, value, s.collapsed)
             want = (not s.collapsed) if value is None else bool(value)
             if want and not s.collapsed:
                 s.collapsed = True
@@ -1311,7 +1338,9 @@ class DeskController(ItemsMixin, QObject):
 
     @Slot(str, "QVariant")
     def action(self, action: str, args=None) -> None:
-        self.run_action(action, dict(args) if isinstance(args, dict) else {})
+        # QML hands JS objects over as QJSValue on some PySide builds (see _action_args);
+        # dropping them silently lost arguments such as {"monitor": ...}.
+        self.run_action(action, _action_args(args))
 
     @Slot(str, str, "QVariant", result="QVariantList")
     def menu(self, context: str, target: str = "", extra=None) -> list:
