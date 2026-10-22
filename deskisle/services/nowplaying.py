@@ -170,6 +170,12 @@ class _Worker:
         self.cover_next = 0.0
         self.cover_digest = None
         self.anchor = None             # (id, title, status, position, stamp) last reported
+        # Players that expose no timeline over GSMTC (网易云音乐 does this) report position 0 on
+        # every poll; synthesise a position from wall time so lyrics/seek keep moving.
+        self.fallback_key = None
+        self.fallback_pos = 0.0
+        self.fallback_stamp = 0.0
+        self.fallback_playing = False
         self.tokens = []               # (source, remover name, token) of event subscriptions
         self.watched = None            # session whose events we listen to
         self.netease_check = 0.0
@@ -337,14 +343,32 @@ class _Worker:
         sid = session.source_app_user_model_id
         title = props.title or ""
         position = max(0.0, position - start)
-        # Keep the previous anchor while it still predicts the position well: the UI
-        # extrapolates locally, so re-sending the same timeline would only cause churn.
-        anchor = self.anchor
-        if anchor is not None and anchor[0] == sid and anchor[1] == title and anchor[2] == status:
-            predicted = anchor[3] + ((stamp - anchor[4]) if status == "playing" else 0.0)
-            if abs(predicted - position) < DRIFT_S:
-                position, stamp = anchor[3], anchor[4]
-        self.anchor = (sid, title, status, position, stamp)
+        # No timeline at all (position/duration both zero): several players - 网易云音乐 among
+        # them - do not publish one over GSMTC.  Keep a wall-clock position instead, otherwise
+        # every poll resets it to 0 and the lyrics never leave the first line.
+        no_timeline = (end - start) < 0.5
+        if no_timeline:
+            key = (sid, title)
+            if self.fallback_key != key:
+                self.fallback_key = key
+                self.fallback_pos = 0.0
+                self.fallback_stamp = stamp
+            else:
+                if self.fallback_playing and status == "playing":
+                    self.fallback_pos += max(0.0, stamp - self.fallback_stamp)
+                self.fallback_stamp = stamp
+            self.fallback_playing = status == "playing"
+            position, stamp = self.fallback_pos, self.fallback_stamp
+            self.anchor = (sid, title, status, position, stamp)
+        else:
+            # Keep the previous anchor while it still predicts the position well: the UI
+            # extrapolates locally, so re-sending the same timeline would only cause churn.
+            anchor = self.anchor
+            if anchor is not None and anchor[0] == sid and anchor[1] == title and anchor[2] == status:
+                predicted = anchor[3] + ((stamp - anchor[4]) if status == "playing" else 0.0)
+                if abs(predicted - position) < DRIFT_S:
+                    position, stamp = anchor[3], anchor[4]
+            self.anchor = (sid, title, status, position, stamp)
         report = {
             "available": True, "hasSession": True, "sessions": listing, "hint": hint,
             "id": sid,
