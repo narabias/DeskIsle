@@ -158,7 +158,7 @@ Item {
         var p = Player.currentPosition()
         var idx = -1
         for (var i = 0; i < lyricLines.length; ++i) {
-            if (lyricLines[i].t <= p + 0.25) {
+            if (lyricLines[i].t <= p + 0.05) {
                 idx = i
             } else {
                 break
@@ -312,7 +312,7 @@ Item {
         onTriggered: media.fetchLyrics()
     }
     Timer {
-        interval: 250
+        interval: 150
         repeat: true
         running: media.visible && Player.playing && media.lyricLines.length > 0
         onTriggered: media.syncLyric()
