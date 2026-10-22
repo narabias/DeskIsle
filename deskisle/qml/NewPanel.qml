@@ -14,7 +14,10 @@ Item {
         var a = args || {}
         a.monitor = key
         Desk.closePanel()
-        Desk.action(name, a)
+        // Creating the island closes this panel, which destroys the tile whose click
+        // handler we are still inside ("Object destroyed while one of its QML signal
+        // handlers is in progress").  Defer to the next event loop turn instead.
+        Qt.callLater(function() { Desk.action(name, a) })
     }
     function openWeb() {
         Desk.openPanel("new:web", key, "")
@@ -168,7 +171,9 @@ Item {
                 dashed: true
                 onActivated: {
                     Desk.closePanel()
-                    Desk.openSettings("widgets:自定义文件夹")
+                    // Same reason as create(): do not tear this tile down from inside
+                    // its own click handler.
+                    Qt.callLater(function() { Desk.openSettings("widgets:自定义文件夹") })
                 }
             }
         }
