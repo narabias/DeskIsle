@@ -35,7 +35,7 @@ Item {
     readonly property bool lyricReady: media.lyricLines.length > 0 && media.lyricIndex >= 0
     readonly property bool lyricsRoom: media.showLine && !media.stacked && media.width >= 320
                                        && media.height - media.lineBlock - 40 >= media.infoHeight + 10
-    readonly property bool showLyrics: media.lyricsRoom && media.lyricReady
+    readonly property bool showLyrics: media.lyricsRoom   // reserve the space even before lyrics arrive: no resize when they load
     readonly property real lyricsHeight: media.showLyrics ? 32 : 0
     readonly property real footerHeight: media.lineBlock + media.lyricsHeight + media.lineInset
     readonly property string songKey: Player.title + "\u0001" + Player.artist
