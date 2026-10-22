@@ -31,6 +31,17 @@ Item {
         Desk.togglePanel(name, key)
     }
 
+    // The "+" turns into an "x" for every "new*" panel (new, new:web).  togglePanel()
+    // only matches an exact name, so from the web sub-page it switched back to the grid
+    // instead of closing: while any "new*" panel is open the button must close it.
+    function toggleNew() {
+        if (bar.panel.indexOf("new") === 0) {
+            Desk.closePanel()
+        } else {
+            bar.toggle("new")
+        }
+    }
+
     RectangularShadow {
         anchors.fill: pill
         radius: pill.radius
@@ -175,7 +186,7 @@ Item {
                 flat: true
                 rotation: bar.panel.indexOf("new") === 0 ? 45 : 0
                 Behavior on rotation { NumberAnimation { duration: Theme.ms(240); easing.type: Easing.OutBack } }
-                onClicked: bar.toggle("new")
+                onClicked: bar.toggleNew()
             }
             IconButton {
                 anchors.verticalCenter: parent.verticalCenter

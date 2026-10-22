@@ -1120,6 +1120,55 @@ def window_visible(hwnd: int) -> bool:
         return False
 
 
+def set_window_region(hwnd: int, x: int, y: int, width: int, height: int,
+                      radius: int = 0, scale: float = 1.0) -> bool:
+    """Clip a window to one rounded rectangle, in device pixels (``scale`` = DPR).
+
+    Popup windows (bar panels, confirmation cards, notices) are sized to their card
+    plus a transparent margin for the drop shadow.  Unpainted margin still belongs to
+    the window for Win32 hit-testing, so it swallows clicks aimed at whatever it
+    covers: the dynamic bar sits exactly in that margin, and its buttons stopped
+    responding while a panel was open (the "+" never closed the panel).  A window
+    region removes the margin from hit-testing; the trade-off is that the shadow,
+    which is painted in that margin, is clipped with it.
+
+    Coordinates are the window's logical pixels; GDI regions are half-open, so the
+    far edge gets +1.  Region ``False`` when the rectangle is degenerate, so a
+    collapsed card cannot eat input.
+    """
+    if not _IS_WINDOWS or not _window_is_valid(hwnd):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        factor = float(scale) if scale and scale > 0 else 1.0
+        left = int(round(x * factor))
+        top = int(round(y * factor))
+        right = int(round((x + max(0, width)) * factor)) + 1
+        bottom = int(round((y + max(0, height)) * factor)) + 1
+        if right - left < 1 or bottom - top < 1:
+            return False
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+        gdi32.CreateRoundRectRgn.restype = wintypes.HRGN
+        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        _user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+        _user32.SetWindowRgn.restype = ctypes.c_int
+        ellipse = int(round(max(0, radius) * 2 * factor))
+        region = gdi32.CreateRoundRectRgn(left, top, right, bottom, ellipse, ellipse)
+        if not region:
+            return False
+        # SetWindowRgn owns the region on success; only delete it when we failed.
+        if not _user32.SetWindowRgn(_as_hwnd(hwnd), region, True):
+            gdi32.DeleteObject(wintypes.HGDIOBJ(region))
+            return False
+        return True
+    except (TypeError, ValueError, OverflowError, OSError, AttributeError):
+        return False
+
+
 def desktop_list_view() -> int:
     return _find_desktop_windows().list_view if _IS_WINDOWS else 0
 
@@ -1493,6 +1542,7 @@ __all__ = [
     "memory_usage",
     "message_box",
     "monitor_rects",
+    "set_window_region",
     "set_window_z",
     "trim_working_set",
     "shell_move",

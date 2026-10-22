@@ -104,6 +104,9 @@ Window {
             y = win.y + win.height - h       // grows upwards from where it was put
         }
         App.placeWindow(win, Math.round(x), Math.round(y), w, h)
+        // The margin around the card is there for the shadow, not for the mouse: left
+        // unclipped it swallows clicks aimed at the bar, which sits in that margin.
+        App.clipWindowToCard(win, win.margin, win.margin, cw, ch, Theme.radius)
     }
     function openWindow() {
         hideTimer.stop()

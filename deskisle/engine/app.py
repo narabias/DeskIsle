@@ -760,6 +760,31 @@ class DeskIsleApp(QObject):
         except (RuntimeError, AttributeError):
             pass
 
+    @Slot(QObject, float, float, float, float, float)
+    def clipWindowToCard(self, window, x: float, y: float, width: float, height: float,  # noqa: N802
+                         radius: float = 0.0) -> None:
+        """QML: make only a popup window's card receive the mouse, not its shadow margin.
+
+        PopupWindow.qml sizes the window to the card plus ``margin`` on every side so
+        the drop shadow has room.  That transparent margin still belongs to the window
+        for Win32 hit-testing, and the dynamic bar sits right in it: clicks on the bar's
+        buttons were delivered to the popup's empty margin and lost, so the "+" panel
+        could not be closed with the same button.  A window region drops the margin
+        from hit-testing (see native_win.set_window_region).
+        """
+        if window is None or not IS_WINDOWS:
+            return
+        try:
+            scale = float(window.devicePixelRatio() or 1.0)
+            hwnd = int(window.winId())
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            return
+        try:
+            native_win.set_window_region(hwnd, int(x), int(y), int(width), int(height),
+                                         int(radius), scale)
+        except Exception:  # noqa: BLE001 - clipping is an optimisation, never fatal
+            log.exception("clip popup window to its card")
+
     @Slot(QObject)
     def activateWindow(self, window) -> None:  # noqa: N802
         try:
