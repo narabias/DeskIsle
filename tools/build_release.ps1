@@ -3,7 +3,9 @@ param(
     [string]$Python = 'python',
     [string]$Iscc = '',
     [string]$OutputDir = '',
-    [switch]$NoOpen
+    [switch]$NoOpen,
+    # Skips the unit tests (the self-test of the finished EXE always runs).
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,7 +54,12 @@ try {
     $Python = $pythonCommand.Source
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $Python -c "import PySide6, PySide6.QtWebEngineWidgets, PySide6.QtMultimedia, PyInstaller, PIL, win32gui, pythoncom" 2>$null
+    # Everything the 2.0 bundle needs: Qt Quick + Multimedia, the lunar calendar,
+    # the WinRT projections (now playing, location), pywin32 and the build tools.
+    $probe = 'import PySide6, PySide6.QtQuick, PySide6.QtMultimedia, PyInstaller, PIL, win32gui, pythoncom, ' +
+             'lunar_python, winrt.windows.foundation.collections, winrt.windows.media.control, ' +
+             'winrt.windows.storage.streams, winrt.windows.devices.geolocation'
+    & $Python -c $probe 2>$null
     $dependencyExit = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
     if ($dependencyExit -ne 0) {
@@ -87,15 +94,29 @@ try {
     }
     if (-not (Test-Path -LiteralPath $Iscc)) { throw "Compiler not found: $Iscc" }
 
-    Invoke-Checked $Python @('-B','-m','unittest','discover','-s','tests','-v') 'tests'
+    if ($SkipTests) {
+        Write-Host '[tests] Skipped (-SkipTests).' -ForegroundColor Yellow
+    } else {
+        Invoke-Checked $Python @('-B','-m','unittest','discover','-s','tests','-v') 'tests'
+    }
+    Invoke-Checked $Python @('-B','tools\gen_guide.py','--check') 'guide'
     Invoke-Checked $Python @('-B','tools\make_app_icon.py') 'icon'
     Invoke-Checked $Python @('-B','-m','PyInstaller','packaging\DeskIsle.spec','--noconfirm','--clean','--distpath',$bundleRoot,'--workpath',(Join-Path $workRoot 'build')) 'bundle'
 
-    Write-Host '[verify] Testing the actual EXE and native context menu...' -ForegroundColor Cyan
+    Write-Host '[verify] Testing the actual EXE, CLI and native context menu...' -ForegroundColor Cyan
     $exePath = Join-Path $bundleRoot 'DeskIsle\DeskIsle.exe'
+    foreach ($required in @('DeskIsle.exe', 'deskisle-cli.exe', 'DeskIsleShellMenu.exe',
+                            '_internal\deskisle\qml\Layer.qml', '_internal\deskisle\qml\glyphs.js',
+                            '_internal\deskisle\agent\GUIDE.md', '_internal\CHANGELOG.md')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $bundleRoot ('DeskIsle\' + $required)))) {
+            throw "The bundle is incomplete: $required is missing."
+        }
+    }
     $reportPath = Join-Path $logRoot 'exe-check.json'
     $testProcess = Start-Process -FilePath $exePath -WindowStyle Hidden -PassThru -ArgumentList @('--self-test',('"'+$reportPath+'"'))
-    if (-not $testProcess.WaitForExit(30000)) {
+    # Starts the whole Qt Quick app offscreen, compiles every QML file, opens all
+    # settings pages and talks to the agent pipe - give slow machines time.
+    if (-not $testProcess.WaitForExit(180000)) {
         $testProcess.Kill()
         throw 'EXE self-test timed out. No installer was produced.'
     }

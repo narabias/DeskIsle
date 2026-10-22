@@ -13,3 +13,5 @@
 *.png binary
 *.svg binary
 *.isl binary
+*.jpg binary
+*.dll binary

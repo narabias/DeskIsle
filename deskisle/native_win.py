@@ -920,6 +920,447 @@ def is_window_covered(hwnd: int, tolerance: int = 12) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# 2.0 additions: monitors, shell file operations, z-order guardian helpers.
+# ---------------------------------------------------------------------------
+
+_HWND_TOP = 0
+_HWND_BOTTOM = 1
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_GW_HWNDPREV = 3
+_FO_MOVE = 0x0001
+_FO_COPY = 0x0002
+_FOF_ALLOWUNDO = 0x0040
+_FOF_NOCONFIRMMKDIR = 0x0200
+_DESKTOP_CLASSES = ("Progman", "WorkerW")
+_twenty_prototypes_ready = False
+
+
+def _ensure_twenty_prototypes() -> None:
+    global _twenty_prototypes_ready
+    if _twenty_prototypes_ready or not _IS_WINDOWS:
+        return
+    _ensure_extra_prototypes()
+    _user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    _user32.GetWindow.restype = wintypes.HWND
+    _user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
+    _user32.GetMonitorInfoW.restype = wintypes.BOOL
+    _twenty_prototypes_ready = True
+
+
+def monitor_rects() -> list[dict]:
+    """Physical monitor rectangles (virtual-screen pixels) from Win32.
+
+    Returns ``[{"device", "rect": (x, y, w, h), "work": (x, y, w, h), "primary"}]``.
+    Qt reports logical sizes; the wallpaper sampler needs real pixels.
+    """
+    if not _IS_WINDOWS:
+        return []
+    try:
+        _ensure_twenty_prototypes()
+
+        class MONITORINFOEXW(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                        ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+        proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                       ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+        found: list[dict] = []
+
+        def callback(hmonitor, _hdc, _rect, _lparam):
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+            if _user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                m, w = info.rcMonitor, info.rcWork
+                found.append({
+                    "device": info.szDevice,
+                    "rect": (m.left, m.top, m.right - m.left, m.bottom - m.top),
+                    "work": (w.left, w.top, w.right - w.left, w.bottom - w.top),
+                    "primary": bool(info.dwFlags & 1),
+                })
+            return True
+
+        enum = _user32.EnumDisplayMonitors
+        enum.argtypes = [wintypes.HDC, ctypes.c_void_p, proc_type, wintypes.LPARAM]
+        enum.restype = wintypes.BOOL
+        enum(None, None, proc_type(callback), 0)
+        return found
+    except Exception:
+        return []
+
+
+def shell_transfer(paths, folder, copy: bool = False, owner: int = 0) -> bool:
+    """Move (or copy) files with Explorer semantics: undo, conflict dialogs.
+
+    Off Windows a plain ``shutil`` fallback keeps tests and the demo working.
+    Returns True when the operation was not aborted.
+    """
+    paths = [str(p) for p in paths if str(p)]
+    folder = str(folder)
+    if not paths or not folder:
+        return False
+    if not _IS_WINDOWS:
+        import shutil
+        ok = True
+        for path in paths:
+            try:
+                target = Path(folder) / Path(path).name
+                if target.exists():
+                    ok = False
+                    continue
+                if copy:
+                    if Path(path).is_dir():
+                        shutil.copytree(path, target)
+                    else:
+                        shutil.copy2(path, target)
+                else:
+                    shutil.move(path, str(target))
+            except OSError:
+                ok = False
+        return ok
+    try:
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", ctypes.c_void_p),
+                        ("pTo", ctypes.c_void_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+        source = "\0".join(os.path.normpath(p) for p in paths) + "\0"
+        target = os.path.normpath(folder) + "\0"
+        source_buffer = ctypes.create_unicode_buffer(source, len(source) + 1)
+        target_buffer = ctypes.create_unicode_buffer(target, len(target) + 1)
+        op = SHFILEOPSTRUCTW()
+        op.hwnd = _as_hwnd(owner)
+        op.wFunc = _FO_COPY if copy else _FO_MOVE
+        op.pFrom = ctypes.addressof(source_buffer)
+        op.pTo = ctypes.addressof(target_buffer)
+        op.fFlags = _FOF_ALLOWUNDO | _FOF_NOCONFIRMMKDIR
+        shell32 = ctypes.WinDLL("shell32")
+        shell32.SHFileOperationW.argtypes = [ctypes.POINTER(SHFILEOPSTRUCTW)]
+        shell32.SHFileOperationW.restype = ctypes.c_int
+        result = shell32.SHFileOperationW(ctypes.byref(op))
+        return result == 0 and not op.fAnyOperationsAborted
+    except Exception:
+        return False
+
+
+def shell_move(paths, folder) -> bool:
+    return shell_transfer(paths, folder, copy=False)
+
+
+def window_class(hwnd: int) -> str:
+    if not _IS_WINDOWS or not hwnd:
+        return ""
+    try:
+        _ensure_extra_prototypes()
+        name = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(_as_hwnd(hwnd), name, 128)
+        return name.value
+    except Exception:
+        return ""
+
+
+def foreground_window() -> int:
+    if not _IS_WINDOWS:
+        return 0
+    try:
+        _ensure_extra_prototypes()
+        return _handle_value(_user32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
+def foreground_is_desktop() -> bool:
+    """The desktop itself (Progman/WorkerW) is the active window (Win+D…)."""
+    return window_class(foreground_window()) in _DESKTOP_CLASSES
+
+
+def desktop_above(hwnd: int, limit: int = 4096) -> bool:
+    """True when a visible desktop window sits above ``hwnd`` in Z order.
+
+    That is what “显示桌面” (Win+D) does: Explorer raises the desktop over
+    every normal window, including our bottom-most layer windows.
+    """
+    if not _IS_WINDOWS or not _window_is_valid(hwnd):
+        return False
+    try:
+        _ensure_twenty_prototypes()
+        current = _handle_value(_user32.GetWindow(_as_hwnd(hwnd), _GW_HWNDPREV))
+        steps = 0
+        while current and steps < limit:
+            if _user32.IsWindowVisible(_as_hwnd(current)) and window_class(current) in _DESKTOP_CLASSES:
+                if _handle_value(_user32.FindWindowExW(_as_hwnd(current), _as_hwnd(0), "SHELLDLL_DefView", None)):
+                    return True
+            current = _handle_value(_user32.GetWindow(_as_hwnd(current), _GW_HWNDPREV))
+            steps += 1
+    except Exception:
+        return False
+    return False
+
+
+def set_window_z(hwnd: int, where: str) -> bool:
+    """``where``: bottom | top | topmost | notopmost (never activates)."""
+    if not _IS_WINDOWS or not _window_is_valid(hwnd):
+        return False
+    insert = {"bottom": _HWND_BOTTOM, "top": _HWND_TOP, "topmost": _HWND_TOPMOST,
+              "notopmost": _HWND_NOTOPMOST}.get(where, _HWND_BOTTOM)
+    try:
+        return bool(_user32.SetWindowPos(_as_hwnd(hwnd), _as_hwnd(insert), 0, 0, 0, 0,
+                                         _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
+def window_visible(hwnd: int) -> bool:
+    if not _IS_WINDOWS:
+        return True
+    try:
+        return bool(_window_is_valid(hwnd) and _user32.IsWindowVisible(_as_hwnd(hwnd)))
+    except Exception:
+        return False
+
+
+def desktop_list_view() -> int:
+    return _find_desktop_windows().list_view if _IS_WINDOWS else 0
+
+
+def desktop_selected_count() -> int:
+    """LVM_GETSELECTEDCOUNT of Explorer's icon view (no pointers: safe cross-process)."""
+    view = desktop_list_view()
+    if not view:
+        return -1
+    result = _DWORD_PTR(0)
+    try:
+        ok = _user32.SendMessageTimeoutW(_as_hwnd(view), 0x1000 + 50, 0, 0, _SMTO_ABORTIFHUNG, 200,
+                                         ctypes.byref(result))
+        return int(result.value) if ok else -1
+    except Exception:
+        return -1
+
+
+def window_from_cursor_class() -> tuple[int, str, str]:
+    """(hwnd, class, parent class) of the window under the cursor."""
+    if not _IS_WINDOWS:
+        return (0, "", "")
+    try:
+        point = wintypes.POINT()
+        _user32.GetCursorPos(ctypes.byref(point))
+        _user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        _user32.WindowFromPoint.restype = wintypes.HWND
+        hwnd = _handle_value(_user32.WindowFromPoint(point))
+        parent = _handle_value(_user32.GetParent(_as_hwnd(hwnd))) if hwnd else 0
+        return (hwnd, window_class(hwnd), window_class(parent))
+    except Exception:
+        return (0, "", "")
+
+
+def double_click_metrics() -> tuple[int, int, int]:
+    """(milliseconds, max dx, max dy) used by Windows for a double click."""
+    if not _IS_WINDOWS:
+        return (500, 4, 4)
+    try:
+        time_ms = int(ctypes.windll.user32.GetDoubleClickTime())
+        return (time_ms, int(_user32.GetSystemMetrics(36)), int(_user32.GetSystemMetrics(37)))
+    except Exception:
+        return (500, 4, 4)
+
+
+def force_foreground(hwnd: int) -> bool:
+    """Bring one of our own windows (settings, tray menu) to the foreground."""
+    if not _IS_WINDOWS or not _window_is_valid(hwnd):
+        return False
+    try:
+        _ensure_extra_prototypes()
+        kernel32 = ctypes.windll.kernel32
+        _user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        _user32.AttachThreadInput.restype = wintypes.BOOL
+        _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        _user32.SetForegroundWindow.restype = wintypes.BOOL
+        _user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        _user32.BringWindowToTop.restype = wintypes.BOOL
+        foreground = _user32.GetForegroundWindow()
+        mine = int(kernel32.GetCurrentThreadId())
+        theirs = int(_user32.GetWindowThreadProcessId(foreground, None)) if foreground else 0
+        attached = bool(theirs and theirs != mine and _user32.AttachThreadInput(theirs, mine, True))
+        try:
+            _user32.BringWindowToTop(_as_hwnd(hwnd))
+            ok = bool(_user32.SetForegroundWindow(_as_hwnd(hwnd)))
+        finally:
+            if attached:
+                _user32.AttachThreadInput(theirs, mine, False)
+        return ok
+    except Exception:
+        return False
+
+
+def set_title_bar(hwnd: int, dark: bool, caption: str = "", text: str = "") -> bool:
+    """Match a normal window's title bar to the theme (Windows 10 2004+ dark mode,
+    Windows 11 caption / text colours; silently ignored where unsupported)."""
+    if not _IS_WINDOWS or not _window_is_valid(hwnd):
+        return False
+    try:
+        dwmapi = ctypes.windll.dwmapi
+        value = ctypes.c_int(1 if dark else 0)
+        ok = dwmapi.DwmSetWindowAttribute(_as_hwnd(hwnd), 20, ctypes.byref(value), ctypes.sizeof(value)) == 0
+        if not ok:  # builds before 18985 used attribute 19
+            ok = dwmapi.DwmSetWindowAttribute(_as_hwnd(hwnd), 19, ctypes.byref(value), ctypes.sizeof(value)) == 0
+
+        def colorref(name: str):
+            name = name.lstrip("#")
+            if len(name) != 6:
+                return None
+            r, g, b = int(name[0:2], 16), int(name[2:4], 16), int(name[4:6], 16)
+            return ctypes.c_uint(r | (g << 8) | (b << 16))
+
+        for attribute, color in ((35, caption), (36, text)):
+            ref = colorref(color) if color else None
+            if ref is not None:
+                dwmapi.DwmSetWindowAttribute(_as_hwnd(hwnd), attribute, ctypes.byref(ref), ctypes.sizeof(ref))
+        return ok
+    except Exception:
+        return False
+
+
+# --- memory (2.0.1) ----------------------------------------------------------------------
+def trim_working_set() -> bool:
+    """Hand the idle working set back to Windows (pages fault back in on demand).
+
+    Same idea as DeskBox's "compress memory when idle": only called when nothing is
+    happening (after startup settles, after the settings window closed, after hiding).
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessWorkingSetSize.argtypes = [wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t]
+        kernel32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+        minus_one = ctypes.c_size_t(-1).value
+        return bool(kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), minus_one, minus_one))
+    except Exception:
+        return False
+
+
+if _IS_WINDOWS:
+    class _PROCESS_MEMORY_COUNTERS_EX2(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+            ("PrivateUsage", ctypes.c_size_t),
+            ("PrivateWorkingSetSize", ctypes.c_size_t),
+            ("SharedCommitUsage", ctypes.c_ulonglong),
+        ]
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+
+def _process_private_ws(kernel32, handle) -> int:
+    """Private working set (what Task Manager's "Memory" column shows), bytes."""
+    counters = _PROCESS_MEMORY_COUNTERS_EX2()
+    counters.cb = ctypes.sizeof(counters)
+    fn = kernel32.K32GetProcessMemoryInfo
+    fn.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+    fn.restype = wintypes.BOOL
+    if fn(handle, ctypes.byref(counters), counters.cb):
+        return int(counters.PrivateWorkingSetSize or counters.WorkingSetSize)
+    # Older Windows 10 builds only know the shorter structure: fall back to the working set.
+    counters.cb = ctypes.sizeof(counters) - ctypes.sizeof(ctypes.c_size_t) - ctypes.sizeof(ctypes.c_ulonglong)
+    if fn(handle, ctypes.byref(counters), counters.cb):
+        return int(counters.WorkingSetSize)
+    return 0
+
+
+def memory_usage() -> dict:
+    """{"self": bytes, "web": bytes, "web_count": n} - DeskIsle and its WebView2 helpers."""
+    result = {"self": 0, "web": 0, "web_count": 0}
+    if not _IS_WINDOWS:
+        return result
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        result["self"] = _process_private_ws(kernel32, kernel32.GetCurrentProcess())
+        # Descendants (WebView2 browser + renderer + GPU processes).
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return result
+        parents: dict[int, int] = {}
+        names: dict[int, str] = {}
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                names[int(entry.th32ProcessID)] = entry.szExeFile.lower()
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        mine = int(kernel32.GetCurrentProcessId())
+        family = {mine}
+        changed = True
+        while changed:  # tiny tree, a few passes at most
+            changed = False
+            for pid, parent in parents.items():
+                if parent in family and pid not in family and pid != parent:
+                    family.add(pid)
+                    changed = True
+        for pid in family - {mine}:
+            if "webview2" not in names.get(pid, ""):
+                continue
+            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)  # QUERY_LIMITED | VM_READ
+            if not handle:
+                continue
+            try:
+                result["web"] += _process_private_ws(kernel32, handle)
+                result["web_count"] += 1
+            finally:
+                kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+    return result
+
+
+def message_box(text: str, title: str = "DeskIsle") -> None:
+    """Last-resort error report (before any Qt window exists)."""
+    if _IS_WINDOWS:
+        try:
+            ctypes.windll.user32.MessageBoxW(None, str(text), str(title), 0x10)
+            return
+        except Exception:
+            pass
+    print("{0}: {1}".format(title, text), file=sys.stderr)
+
+
 class DesktopHost:
     """Convenience owner for the native state associated with one HWND."""
 
@@ -982,7 +1423,7 @@ class DesktopHost:
 
     def cleanup(self, hwnd: int | None = None) -> None:
         self._bind(hwnd)
-        for hotkey_id in list((0x5151, 0x5152, 0x5153, 0x5154)):
+        for hotkey_id in list((0x5151, 0x5152, 0x5153, 0x5154, 0x5155)):
             unregister_hotkey(self.hwnd, hotkey_id)
         restore_native_desktop_icons()
         self.detach()
@@ -1043,6 +1484,21 @@ __all__ = [
     "VK_TAB",
     "VK_UP",
     "add_to_startup",
+    "desktop_above",
+    "desktop_selected_count",
+    "double_click_metrics",
+    "force_foreground",
+    "foreground_is_desktop",
+    "foreground_window",
+    "memory_usage",
+    "message_box",
+    "monitor_rects",
+    "set_window_z",
+    "trim_working_set",
+    "shell_move",
+    "shell_transfer",
+    "window_class",
+    "window_visible",
     "attach_to_desktop",
     "detach_from_desktop",
     "is_windows",

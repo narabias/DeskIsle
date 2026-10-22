@@ -232,6 +232,23 @@ class StateStore:
             reverse=True,
         )
 
+    def delete_snapshot(self, snapshot: str | PathLike[str]) -> bool:
+        """Delete one snapshot file; only files directly inside the snapshot folder."""
+
+        source = self._resolve_snapshot(snapshot)
+        try:
+            folder = self.snapshots_dir.resolve()
+            target = source.resolve()
+        except OSError:
+            return False
+        if target.parent != folder or target.suffix.casefold() != ".json" or not target.is_file():
+            return False
+        try:
+            target.unlink()
+        except OSError:
+            return False
+        return True
+
     def restore_snapshot(self, snapshot: str | PathLike[str]) -> AppState:
         """Restore a snapshot as current state and return the restored model."""
 

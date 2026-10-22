@@ -1,4 +1,5 @@
-"""DeskIsle desktop organizer."""
+﻿"""DeskIsle desktop organizer."""
 
-__version__ = "1.2.1"
+__version__ = "2.1.0"
+
 

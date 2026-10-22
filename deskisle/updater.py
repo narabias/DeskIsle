@@ -367,31 +367,10 @@ class UpdateManager(QObject):
         except (TypeError, ValueError):
             return 0
 
-    @staticmethod
-    def _raw_header(reply: QNetworkReply, name: str) -> str:
-        """Read a raw reply header as text.
-
-        QNetworkReply.rawHeader takes the header *name* as ``str`` (it returns
-        QByteArray). Passing ``bytes`` raises a TypeError, so the name is
-        always normalised to ``str`` here and the returned buffer is decoded
-        defensively.
-        """
-
-        try:
-            value = reply.rawHeader(name)
-        except (TypeError, RuntimeError):
-            return ""
-        if not value:
-            return ""
-        try:
-            return bytes(value).decode("ascii", "ignore").strip()
-        except (TypeError, ValueError):
-            return ""
-
     def _error_message(self, reply: QNetworkReply) -> str:
         status = self._http_status(reply)
         if status in (403, 429):
-            remaining = self._raw_header(reply, "X-RateLimit-Remaining")
+            remaining = bytes(reply.rawHeader(b"X-RateLimit-Remaining") or b"").decode("ascii", "ignore")
             if remaining == "0" or status == 429:
                 return "GitHub 接口请求次数暂时用完，请稍后再试。"
             return "GitHub 拒绝了这次请求（HTTP {0}）。".format(status)

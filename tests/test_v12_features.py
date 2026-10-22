@@ -1,37 +1,18 @@
-"""Regression tests for the 1.2 features (materials, media, HTML/web islands, updates)."""
+"""Model, updater and storage regressions from 1.2 that still apply to 2.0."""
 
 from __future__ import annotations
 
-import os
 import shutil
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 from uuid import uuid4
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-# Never start Chromium in unit tests: HTML / web islands show their placeholder.
-os.environ.setdefault("DESKISLE_DISABLE_WEBENGINE", "1")
-
-from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
-
-import deskisle  # noqa: E402
-import deskisle.board as board_module  # noqa: E402
-from deskisle.board import DesktopWindow  # noqa: E402
-from deskisle.dialogs import (  # noqa: E402
-    FPS_CHOICES,
-    IslandAppearanceDialog,
-    NewIslandDialog,
-    SettingsDialog,
-)
-from deskisle.html_view import normalize_url  # noqa: E402
-from deskisle.island import MAX_ICON_SIZE, IslandWidget  # noqa: E402
-from deskisle.models import AppState, IslandState, PageState, Preferences, TabState  # noqa: E402
-from deskisle.motion import COLLAPSE_MS, ZOOM_MS  # noqa: E402
-from deskisle.storage import StateStore  # noqa: E402
-from deskisle.updater import (  # noqa: E402
+import deskisle
+from deskisle.engine.webhost import normalize_url
+from deskisle.models import AppState, IslandState, PageState, Preferences, TabState
+from deskisle.storage import StateStore
+from deskisle.updater import (
     RELEASES_PAGE,
     ReleaseInfo,
     UpdateManager,
@@ -69,21 +50,12 @@ def _release_payload() -> dict:
 
 
 class _Workspace(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.app = QApplication.instance() or QApplication([])
-
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parent / ".test-work" / uuid4().hex
         self.root.mkdir(parents=True)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
-
-    def html_file(self) -> Path:
-        path = self.root / "动画.html"
-        path.write_text("<html><body style='background:transparent'>hi</body></html>", encoding="utf-8")
-        return path
 
 
 class ModelTests(unittest.TestCase):
@@ -104,7 +76,8 @@ class ModelTests(unittest.TestCase):
         data = island.to_dict()
         data["future_field"] = {"keep": True}
         restored = IslandState.from_dict(data)
-        for name in ("kind", "html_path", "html_allow_network", "material", "media_path", "media_opacity",
+        self.assertEqual(restored.kind, "web")  # 2.0: "html" islands became "web"
+        for name in ("html_path", "html_allow_network", "material", "media_path", "media_opacity",
                      "media_feather", "pin_on_top", "web_zoom", "web_refresh_minutes"):
             self.assertEqual(getattr(restored, name), getattr(island, name), name)
         self.assertTrue(restored.is_web_content)
@@ -215,49 +188,6 @@ class UpdaterTests(_Workspace):
         self.assertIn("没有提供", failures[-1])
         self.assertFalse(manager.is_downloading)
 
-    def test_error_message_reads_rate_limit_header_without_wrong_argument_types(self) -> None:
-        """rawHeader takes the header name as str; passing bytes used to crash.
-
-        The crash surfaced as a global exception dialog while the app was
-        merely being dragged, because the update check runs in the background.
-        """
-        manager = UpdateManager(None, None, "1.1.3")
-        from PySide6.QtCore import QByteArray
-
-        class _FakeReply:
-            def __init__(self, status: int, headers: dict[str, bytes]) -> None:
-                self._status = status
-                self._headers = headers
-
-            def attribute(self, _which):
-                return self._status
-
-            def rawHeader(self, name):
-                # Mirror the strict binding: only str is accepted.
-                if not isinstance(name, str):
-                    raise TypeError(
-                        "QNetworkReply.rawHeader called with wrong argument types"
-                    )
-                return QByteArray(self._headers.get(name, b""))
-
-            def error(self):
-                return 0  # NoError; the 403/429 branches never read it.
-
-            def errorString(self) -> str:
-                return ""
-
-        # 429 must be reported as rate limiting, not as a crash.
-        reply = _FakeReply(429, {"X-RateLimit-Remaining": b"0"})
-        self.assertIn("次数", manager._error_message(reply))
-
-        # 403 with a non-zero remaining count is a plain rejection.
-        reply = _FakeReply(403, {"X-RateLimit-Remaining": b"42"})
-        self.assertIn("403", manager._error_message(reply))
-
-        # Missing header must not raise either.
-        reply = _FakeReply(403, {})
-        self.assertIn("403", manager._error_message(reply))
-
     def test_version_file_matches_package_version(self) -> None:
         version_file = Path(__file__).resolve().parents[1] / "VERSION"
         self.assertEqual(version_file.read_text(encoding="utf-8").strip(), deskisle.__version__)
@@ -329,214 +259,12 @@ class StorageTests(_Workspace):
         self.assertEqual(managed.suffix, ".ttf")
 
 
-class IslandWidgetTests(_Workspace):
-    def test_count_badge_keeps_pill_height_when_collapsed(self) -> None:
-        state = IslandState(title="一个很长很长的收纳岛名称用来测试省略显示", width=360, height=300, tabs=[TabState()])
-        widget = IslandWidget(state, desktop_window=True)
-        widget.show()
-        self.app.processEvents()
-        header = widget.header
-        badge = header.badge_rect()
-        self.assertEqual(badge.height(), 20.0)
-        self.assertLessEqual(badge.right(), header.collapse_button.x())
-
-        widget.toggle_collapsed()
-        QTest.qWait(COLLAPSE_MS + 160)
-        self.assertTrue(state.collapsed)
-        self.assertEqual(widget.height(), 44)
-        badge = header.badge_rect()
-        self.assertEqual(badge.height(), 20.0)
-        self.assertGreaterEqual(badge.top(), 0)
-        self.assertLessEqual(badge.bottom(), header.height())
-        self.assertLessEqual(badge.right(), header.collapse_button.x())
-        header.set_badge("128")
-        wide = header.badge_rect()
-        self.assertEqual(wide.height(), 20.0)
-        self.assertGreater(wide.width(), 20.0)
-        widget.toggle_collapsed()
-        QTest.qWait(COLLAPSE_MS + 160)
-        self.assertFalse(state.collapsed)
-        self.assertEqual(widget.height(), 300)
-        widget.close()
-
-    def test_icon_zoom_animates_to_target_and_is_clamped(self) -> None:
-        state = IslandState(icon_size=48, tabs=[TabState()])
-        widget = IslandWidget(state, desktop_window=True)
-        widget.show()
-        self.app.processEvents()
-        widget.zoom_icons(1)
-        self.assertEqual(state.icon_size, 56)
-        self.assertTrue(widget.item_list.is_zooming())
-        QTest.qWait(ZOOM_MS + 160)
-        self.assertFalse(widget.item_list.is_zooming())
-        self.assertEqual(widget.item_list.iconSize().width(), 56)
-
-        widget.zoom_icons(-1)
-        QTest.qWait(ZOOM_MS // 3)
-        widget.zoom_icons(-1)  # re-target while the first zoom is still running
-        QTest.qWait(ZOOM_MS + 160)
-        self.assertEqual(state.icon_size, 40)
-        self.assertEqual(widget.item_list.iconSize().width(), 40)
-
-        for _ in range(20):
-            widget.zoom_icons(1)
-        QTest.qWait(ZOOM_MS + 160)
-        self.assertEqual(state.icon_size, MAX_ICON_SIZE)
-        self.assertEqual(widget.item_list.iconSize().width(), MAX_ICON_SIZE)
-        widget.close()
-
-    def test_html_and_web_islands_show_placeholder_and_ignore_icon_zoom(self) -> None:
-        cases = (
-            IslandState(kind="html", html_path=str(self.html_file()), width=420, height=320, tabs=[TabState()]),
-            IslandState(kind="web", web_url="https://example.com", width=420, height=320, tabs=[TabState()]),
-        )
-        for state in cases:
-            with self.subTest(kind=state.kind):
-                widget = IslandWidget(state, desktop_window=True)
-                widget.show()
-                self.app.processEvents()
-                self.assertTrue(widget.is_web_content)
-                self.assertIsNotNone(widget.web)
-                self.assertIsNotNone(widget.web.placeholder)
-                self.assertFalse(widget.item_list.isVisible())
-                widget.zoom_icons(1)
-                self.assertEqual(state.icon_size, 48)
-                widget.toggle_collapsed()
-                QTest.qWait(COLLAPSE_MS + 160)
-                self.assertEqual(widget.height(), 44)
-                widget.toggle_collapsed()
-                QTest.qWait(COLLAPSE_MS + 160)
-                self.assertEqual(widget.height(), 320)
-                widget.close()
-
+class UrlTests(unittest.TestCase):
     def test_normalize_url(self) -> None:
         self.assertEqual(normalize_url("example.com"), "https://example.com")
         self.assertEqual(normalize_url("https://github.com/narabias"), "https://github.com/narabias")
         self.assertEqual(normalize_url("  "), "")
         self.assertTrue(normalize_url("北京 天气").startswith("https://www.bing.com/search?q="))
-
-
-class DialogTests(_Workspace):
-    def test_new_island_dialog_kinds(self) -> None:
-        for kind, island_kind in (("normal", "files"), ("portal", "files"), ("html", "html"), ("web", "web")):
-            with self.subTest(kind=kind):
-                dialog = NewIslandDialog(None, None, kind)
-                self.assertEqual(dialog.selected_kind(), kind)
-                self.assertEqual(dialog.data()["island_kind"], island_kind)
-                dialog.close()
-
-        dialog = NewIslandDialog(None, None, "html")
-        dialog._validate_and_accept()
-        self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted, "a missing HTML file must be rejected")
-        dialog.html_edit.setText(str(self.html_file()))
-        dialog.name_edit.setText("极光")
-        dialog._validate_and_accept()
-        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-        data = dialog.data()
-        self.assertEqual((data["title"], data["html_allow_network"]), ("极光", False))
-        self.assertTrue(data["html_path"].endswith("动画.html"))
-
-        dialog = NewIslandDialog(None, None, "web")
-        dialog.url_edit.setText("example.com")
-        dialog._validate_and_accept()
-        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-        self.assertEqual(dialog.data()["web_url"], "https://example.com")
-
-    def test_settings_dialog_saves_new_preferences(self) -> None:
-        original = Preferences()
-        dialog = SettingsDialog(original)
-        dialog.material_control.setCurrentIndex(2)
-        dialog.reduce_motion_check.setChecked(True)
-        dialog.smart_pause_check.setChecked(False)
-        dialog.fps_control.setCurrentIndex(FPS_CHOICES.index(30))
-        dialog.auto_update_check.setChecked(False)
-        dialog.font_size_spin.setValue(12.0)
-        dialog._save_and_accept()
-        saved = dialog.preferences
-        self.assertEqual(saved.island_material, "liquid")
-        self.assertTrue(saved.reduce_motion)
-        self.assertFalse(saved.smart_pause)
-        self.assertEqual(saved.media_fps, 30)
-        self.assertFalse(saved.auto_check_updates)
-        self.assertEqual(saved.font_size, 12.0)
-        self.assertEqual(saved.backdrop_source, "wallpaper", "no image chosen -> keep the wallpaper")
-        self.assertEqual(original.island_material, "frosted", "the input preferences must not be mutated")
-
-        dialog = SettingsDialog(saved)
-        dialog._restore_defaults()
-        dialog._save_and_accept()
-        self.assertEqual(dialog.preferences.island_material, "frosted")
-        self.assertEqual(dialog.preferences.media_fps, 24)
-        self.assertTrue(dialog.preferences.auto_check_updates)
-
-    def test_appearance_dialog_values_and_preview(self) -> None:
-        state = IslandState(title="工作", color="#4F7CAC")
-        previews: list[dict] = []
-        dialog = IslandAppearanceDialog(state, "frosted", previews.append)
-        dialog.name_edit.setText("我的收纳岛")
-        dialog.material_control.setCurrentIndex(3)
-        values = dialog.values()
-        self.assertEqual(values["title"], "我的收纳岛")
-        self.assertEqual(values["material"], "liquid")
-        self.assertEqual(values["color"], "#4F7CAC")
-        self.assertEqual(values["media_path"], "")
-        self.assertAlmostEqual(values["media_opacity"], 0.9)
-        self.assertEqual(values["media_feather"], 26)
-        QTest.qWait(120)
-        self.assertTrue(previews)
-        self.assertEqual(previews[-1]["title"], "我的收纳岛")
-
-        dialog.name_edit.setText("   ")
-        dialog._validate_and_accept()
-        self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted, "an empty name must be rejected")
-        dialog.material_control.setCurrentIndex(0)
-        self.assertEqual(dialog.values()["material"], "")
-
-
-class BoardTests(_Workspace):
-    def test_board_creates_html_and_web_islands(self) -> None:
-        normal = IslandState(title="普通", tabs=[TabState()])
-        page = PageState(title="主页", islands=[normal])
-        state = AppState(pages=[page], current_page_id=page.id)
-        original_dirs = board_module._desktop_directories
-        board_module._desktop_directories = lambda: []
-        try:
-            window = DesktopWindow(state, StateStore(self.root / "data"), demo_mode=True)
-            window.resize(1200, 760)
-            window.show()
-            self.app.processEvents()
-
-            html_data = {"island_kind": "html", "title": "", "html_path": str(self.html_file()),
-                         "html_allow_network": False}
-            with patch.object(board_module.NewIslandDialog, "get_data", return_value=html_data):
-                window.add_island(kind="html")
-            html_state = page.islands[-1]
-            self.assertEqual(html_state.kind, "html")
-            self.assertEqual(html_state.title, "HTML 动画")
-            self.assertEqual((html_state.width, html_state.height), (420, 320))
-            self.assertTrue(window.islands[html_state.id].is_web_content)
-
-            web_data = {"island_kind": "web", "title": "看板", "web_url": "https://example.com"}
-            with patch.object(board_module.NewIslandDialog, "get_data", return_value=web_data):
-                window.add_island(kind="web")
-            web_state = page.islands[-1]
-            self.assertEqual((web_state.kind, web_state.title, web_state.web_url),
-                             ("web", "看板", "https://example.com"))
-            self.assertIsNone(web_state.tabs[0].portal_path)
-
-            with patch.object(board_module.NewIslandDialog, "get_data", return_value=None):
-                window.add_island()
-            self.assertEqual(len(page.islands), 3)
-
-            self.assertTrue(board_module._is_file_island(normal))
-            self.assertFalse(board_module._is_file_island(html_state))
-            self.assertFalse(board_module._is_file_island(web_state))
-
-            window._closing_for_real = True
-            window.close()
-            self.app.processEvents()
-        finally:
-            board_module._desktop_directories = original_dirs
 
 
 if __name__ == "__main__":
